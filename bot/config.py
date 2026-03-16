@@ -3,10 +3,25 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
-load_dotenv()
+
+def _bootstrap_env() -> None:
+    root_dir = Path(__file__).resolve().parent.parent
+    env_path = root_dir / ".env"
+    example_path = root_dir / ".env.example"
+
+    load_dotenv(env_path)
+
+    if example_path.exists():
+        for key, value in dotenv_values(example_path).items():
+            if value and not os.getenv(key):
+                os.environ[key] = value
+
+
+_bootstrap_env()
 
 
 def _get_required(name: str) -> str:
