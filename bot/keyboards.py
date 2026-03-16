@@ -59,6 +59,12 @@ def add_api_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def api_prompt_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Back", callback_data="api:cancel")]]
+    )
+
+
 def app_actions_keyboard(app_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [

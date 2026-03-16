@@ -18,7 +18,13 @@ from pyrogram.types import CallbackQuery, Message
 from bot.config import Settings, configure_logging
 from bot.database import Database
 from bot.heroku import HerokuAPIError, HerokuClient
-from bot.keyboards import add_api_keyboard, app_actions_keyboard, apps_keyboard, force_sub_keyboard
+from bot.keyboards import (
+    add_api_keyboard,
+    api_prompt_keyboard,
+    app_actions_keyboard,
+    apps_keyboard,
+    force_sub_keyboard,
+)
 
 LOGGER = logging.getLogger(__name__)
 WAITING_API_STATE = "waiting_api_key"
@@ -164,6 +170,16 @@ async def render_apps(message: Message, user_id: int, page: int = 0) -> None:
     await message.reply_text(text, reply_markup=apps_keyboard(apps, page))
 
 
+async def render_add_api_prompt(callback_query: CallbackQuery, user_id: int) -> None:
+    await db.set_state(user_id, WAITING_API_STATE)
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(
+            "Send your Heroku API key in this chat.\n"
+            "The bot will verify it and save it in MongoDB.",
+            reply_markup=api_prompt_keyboard(),
+        )
+
+
 async def render_apps_in_place(callback_query: CallbackQuery, user_id: int, page: int = 0) -> None:
     heroku = await get_heroku_client(user_id)
     apps = await heroku.list_apps()
@@ -272,7 +288,8 @@ async def api_capture_handler(client: Client, message: Message) -> None:
         account = await heroku.validate_token()
     except HerokuAPIError as exc:
         await message.reply_text(
-            f"That API key could not be verified.\nError: <code>{html.escape(str(exc))}</code>\n\nTry again."
+            f"That API key could not be verified.\nError: <code>{html.escape(str(exc))}</code>\n\nTry again.",
+            reply_markup=api_prompt_keyboard(),
         )
         return
 
@@ -308,12 +325,22 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
             return
 
         if data == "api:add":
-            await db.set_state(user_id, WAITING_API_STATE)
-            await callback_query.message.reply_text(
-                "Send your Heroku API key in this chat.\n"
-                "The bot will verify it and save it in MongoDB."
-            )
+            await render_add_api_prompt(callback_query, user_id)
             await callback_query.answer("Waiting for your API key.")
+            return
+
+        if data == "api:cancel":
+            await db.set_state(user_id, None)
+            user = await db.get_user(user_id)
+            if user and user.get("heroku_api_key"):
+                await render_apps_in_place(callback_query, user_id)
+            else:
+                with suppress(MessageNotModified):
+                    await callback_query.message.edit_text(
+                        "No Heroku API key saved yet.\nTap the button below and send your Heroku API key.",
+                        reply_markup=add_api_keyboard(),
+                    )
+            await callback_query.answer("Back.")
             return
 
         if data == "api:remove":
