@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 from contextlib import suppress
 
 import aiohttp
@@ -159,6 +160,25 @@ async def reply_private_only(message: Message) -> None:
     await message.reply_text(
         f"Use this bot in private for Heroku app management.\nOpen: {target}"
     )
+
+
+def normalize_heroku_api_key(raw_text: str) -> str:
+    cleaned = raw_text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned = cleaned.strip("`\"'")
+
+    match = re.search(r"(HRKU-[A-Za-z0-9_-]+)", cleaned)
+    if match:
+        return match.group(1)
+
+    uuid_match = re.search(
+        r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+        cleaned,
+    )
+    if uuid_match:
+        return uuid_match.group(1)
+
+    return cleaned
 
 
 def format_formation(formation: list[dict]) -> str:
@@ -319,7 +339,7 @@ async def api_capture_handler(client: Client, message: Message) -> None:
     if state != WAITING_API_STATE:
         return
 
-    api_key = message.text.strip()
+    api_key = normalize_heroku_api_key(message.text)
     heroku = HerokuClient(api_key, await get_http_session())
 
     try:
