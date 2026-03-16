@@ -162,6 +162,14 @@ async def reply_private_only(message: Message) -> None:
     )
 
 
+def api_key_prompt_text() -> str:
+    return (
+        "Send your Heroku API key in this chat.\n"
+        "The bot will verify it and save it in MongoDB.\n\n"
+        "If your key has many <code>_</code> characters, send it in one of these safe formats:\n"
+        "<code>`HRKU-...`</code>\n"
+        "<code>key: HRKU-...</code>"
+    )
 def normalize_heroku_api_key(raw_text: str) -> str:
     """
     Clean Heroku API key pasted by users in Telegram.
@@ -240,8 +248,7 @@ async def render_add_api_prompt(callback_query: CallbackQuery, user_id: int) -> 
     await db.set_state(user_id, WAITING_API_STATE)
     with suppress(MessageNotModified):
         await callback_query.message.edit_text(
-            "Send your Heroku API key in this chat.\n"
-            "The bot will verify it and save it in MongoDB.",
+            api_key_prompt_text(),
             reply_markup=api_prompt_keyboard(),
         )
 
@@ -354,7 +361,11 @@ async def api_capture_handler(client: Client, message: Message) -> None:
         account = await heroku.validate_token()
     except HerokuAPIError as exc:
         await message.reply_text(
-            f"That API key could not be verified.\nError: <code>{html.escape(str(exc))}</code>\n\nTry again.",
+            "That API key could not be verified.\n"
+            f"Error: <code>{html.escape(str(exc))}</code>\n\n"
+            "If Telegram changed repeated <code>_</code> characters, send it as "
+            "<code>`HRKU-...`</code> or <code>key: HRKU-...</code>.\n\n"
+            "Try again.",
             reply_markup=api_prompt_keyboard(),
         )
         return
