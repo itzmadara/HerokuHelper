@@ -7,10 +7,8 @@ from contextlib import suppress
 
 import aiohttp
 
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
+MAIN_LOOP = asyncio.new_event_loop()
+asyncio.set_event_loop(MAIN_LOOP)
 
 from pyrogram import Client, filters, idle
 from pyrogram.enums import ChatMemberStatus, ChatType, ParseMode
@@ -419,7 +417,10 @@ async def run() -> None:
 
 
 def main() -> None:
-    asyncio.run(run())
+    try:
+        MAIN_LOOP.run_until_complete(run())
+    finally:
+        MAIN_LOOP.close()
 
 
 if __name__ == "__main__":
