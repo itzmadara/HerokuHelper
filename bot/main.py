@@ -169,7 +169,7 @@ def is_owner(user_id: int) -> bool:
 def api_key_prompt_text() -> str:
     return (
         "Send your Heroku API key in this chat.\n"
-        "The bot will verify it and save it in MongoDB.\n\n"
+        "The bot will verify it\n\n"
         "If your key has many <code>_</code> characters, send it in one of these safe formats:\n"
         "<code>`HRKU-...`</code>\n"
         "<code>key: HRKU-...</code>"
@@ -371,7 +371,7 @@ async def start_handler(client: Client, message: Message) -> None:
 
     text = (
         "Welcome to Heroku Helper Bot.\n\n"
-        "Use /myapps to connect your Heroku API key and manage your apps from inline buttons."
+        "Use /myapps to connect your Heroku API key and manage your apps Directly From Telegram."
     )
     await message.reply_text(text)
 
