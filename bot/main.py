@@ -40,6 +40,17 @@ db = Database(settings.mongo_uri, settings.mongo_db)
 http_session: aiohttp.ClientSession | None = None
 
 
+async def clear_bot_webhook() -> None:
+    session = await get_http_session()
+    url = f"https://api.telegram.org/bot{settings.bot_token}/deleteWebhook"
+    async with session.post(url, json={"drop_pending_updates": True}) as response:
+        payload = await response.json(content_type=None)
+        if response.status >= 400 or not payload.get("ok"):
+            LOGGER.warning("Failed to clear Telegram webhook: %s", payload)
+        else:
+            LOGGER.info("Telegram webhook cleared")
+
+
 async def get_http_session() -> aiohttp.ClientSession:
     global http_session
     if http_session is None or http_session.closed:
@@ -337,6 +348,7 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
 
 async def startup() -> None:
     await db.setup()
+    await clear_bot_webhook()
     LOGGER.info("Database indexes ready")
 
 
