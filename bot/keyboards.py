@@ -16,13 +16,11 @@ def _chunk(items: list[InlineKeyboardButton], size: int) -> list[list[InlineKeyb
     return rows
 
 
-def force_sub_keyboard(channels: list[str], links: list[str]) -> InlineKeyboardMarkup:
+def force_sub_keyboard(targets: list[dict[str, str]]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for index, channel in enumerate(channels):
-        label = channel
-        url = links[index] if index < len(links) else None
-        if not url and channel.startswith("@"):
-            url = f"https://t.me/{channel[1:]}"
+    for target in targets:
+        label = target["label"]
+        url = target.get("url")
         if url:
             rows.append([InlineKeyboardButton(f"Join {label}", url=url)])
     rows.append([InlineKeyboardButton("I Joined, Refresh", callback_data="forcesub:refresh")])

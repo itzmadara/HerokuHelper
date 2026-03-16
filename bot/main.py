@@ -73,18 +73,54 @@ async def get_heroku_client(user_id: int) -> HerokuClient:
     return HerokuClient(user["heroku_api_key"], session)
 
 
-async def ensure_force_sub(client: Client, user_id: int) -> list[str]:
-    missing: list[str] = []
-    for channel in settings.force_sub_channels:
+def parse_chat_ref(channel: str) -> int | str:
+    value = channel.strip()
+    if value.lstrip("-").isdigit():
+        return int(value)
+    return value
+
+
+async def get_force_sub_targets(client: Client) -> list[dict[str, int | str]]:
+    targets: list[dict[str, int | str]] = []
+    for index, channel in enumerate(settings.force_sub_channels):
+        chat_ref = parse_chat_ref(channel)
+        title = channel
+        url = settings.force_sub_links[index] if index < len(settings.force_sub_links) else ""
+
         try:
-            member = await client.get_chat_member(channel, user_id)
+            chat = await client.get_chat(chat_ref)
+            title = getattr(chat, "title", None) or getattr(chat, "username", None) or channel
+
+            if not url and getattr(chat, "username", None):
+                url = f"https://t.me/{chat.username}"
+
+            if not url and getattr(chat, "invite_link", None):
+                url = chat.invite_link
+
+            if not url:
+                with suppress(Exception):
+                    url = await client.export_chat_invite_link(chat.id)
+        except Exception as exc:
+            LOGGER.warning("Force-sub chat lookup failed for %s: %s", channel, exc)
+
+        targets.append({"chat_ref": chat_ref, "label": str(title), "url": url})
+
+    return targets
+
+
+async def ensure_force_sub(client: Client, user_id: int) -> list[dict[str, int | str]]:
+    missing: list[dict[str, int | str]] = []
+    for target in await get_force_sub_targets(client):
+        try:
+            member = await client.get_chat_member(target["chat_ref"], user_id)
             if member.status in {
                 ChatMemberStatus.LEFT,
                 ChatMemberStatus.BANNED,
             }:
-                missing.append(channel)
-        except Exception:
-            missing.append(channel)
+                missing.append(target)
+        except Exception as exc:
+            LOGGER.warning("Force-sub membership check failed for %s: %s", target["chat_ref"], exc)
+            missing.append(target)
     return missing
 
 
@@ -97,11 +133,13 @@ async def require_subscription(message: Message | None, callback_query: Callback
     if not missing:
         return True
 
+    channels_text = "\n".join(f"- {html.escape(str(target['label']))}" for target in missing)
     text = (
         "You need to join the required channels before using this bot.\n"
+        f"{channels_text}\n\n"
         "Join all channels below, then tap refresh."
     )
-    markup = force_sub_keyboard(settings.force_sub_channels, settings.force_sub_links)
+    markup = force_sub_keyboard(missing)
 
     if callback_query:
         with suppress(MessageNotModified):
