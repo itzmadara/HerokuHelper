@@ -163,22 +163,7 @@ async def reply_private_only(message: Message) -> None:
 
 
 def normalize_heroku_api_key(raw_text: str) -> str:
-    cleaned = raw_text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
-    cleaned = re.sub(r"\s+", "", cleaned)
-    cleaned = cleaned.strip("`\"'")
-
-    match = re.search(r"(HRKU-[A-Za-z0-9_-]+)", cleaned)
-    if match:
-        return match.group(1)
-
-    uuid_match = re.search(
-        r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
-        cleaned,
-    )
-    if uuid_match:
-        return uuid_match.group(1)
-
-    return cleaned
+    return raw_text.strip().replace("`", "").replace('"', "")
 
 
 def format_formation(formation: list[dict]) -> str:
