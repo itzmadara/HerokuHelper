@@ -13,7 +13,7 @@ except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 from pyrogram import Client, filters, idle
-from pyrogram.enums import ChatMemberStatus, ParseMode
+from pyrogram.enums import ChatMemberStatus, ChatType, ParseMode
 from pyrogram.errors import MessageNotModified
 from pyrogram.types import CallbackQuery, Message
 
@@ -24,6 +24,7 @@ from bot.keyboards import add_api_keyboard, app_actions_keyboard, apps_keyboard,
 
 LOGGER = logging.getLogger(__name__)
 WAITING_API_STATE = "waiting_api_key"
+bot_username: str | None = None
 
 settings = Settings.from_env()
 configure_logging(settings.log_level)
@@ -105,6 +106,17 @@ async def require_subscription(message: Message | None, callback_query: Callback
     elif message:
         await message.reply_text(text, reply_markup=markup)
     return False
+
+
+def is_private_message(message: Message) -> bool:
+    return message.chat.type == ChatType.PRIVATE
+
+
+async def reply_private_only(message: Message) -> None:
+    target = f"https://t.me/{bot_username}" if bot_username else "my private chat"
+    await message.reply_text(
+        f"Use this bot in private for Heroku app management.\nOpen: {target}"
+    )
 
 
 def format_formation(formation: list[dict]) -> str:
@@ -189,8 +201,11 @@ async def render_app_panel(callback_query: CallbackQuery, user_id: int, app_name
         await callback_query.message.edit_text(info, reply_markup=app_actions_keyboard(app_name))
 
 
-@app.on_message(filters.private & filters.command("start"))
+@app.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message) -> None:
+    if not is_private_message(message):
+        await reply_private_only(message)
+        return
     if not await require_subscription(message):
         return
 
@@ -201,15 +216,21 @@ async def start_handler(client: Client, message: Message) -> None:
     await message.reply_text(text)
 
 
-@app.on_message(filters.private & filters.command("myapps"))
+@app.on_message(filters.command("myapps"))
 async def myapps_handler(client: Client, message: Message) -> None:
+    if not is_private_message(message):
+        await reply_private_only(message)
+        return
     if not await require_subscription(message):
         return
     await render_apps(message, message.from_user.id)
 
 
-@app.on_message(filters.private & filters.command("help"))
+@app.on_message(filters.command("help"))
 async def help_handler(client: Client, message: Message) -> None:
+    if not is_private_message(message):
+        await reply_private_only(message)
+        return
     if not await require_subscription(message):
         return
     await message.reply_text(
@@ -217,6 +238,23 @@ async def help_handler(client: Client, message: Message) -> None:
         "/start - start the bot\n"
         "/myapps - connect API key and list Heroku apps\n"
         "/help - show this help"
+    )
+
+
+@app.on_message(filters.command("ping"))
+async def ping_handler(client: Client, message: Message) -> None:
+    await message.reply_text("Bot is online.")
+
+
+@app.on_message(group=-1)
+async def incoming_update_logger(client: Client, message: Message) -> None:
+    kind = "command" if message.text and message.text.startswith("/") else "message"
+    LOGGER.info(
+        "Incoming %s | chat_id=%s | chat_type=%s | user_id=%s",
+        kind,
+        getattr(message.chat, "id", None),
+        getattr(message.chat, "type", None),
+        getattr(message.from_user, "id", None),
     )
 
 
@@ -352,6 +390,18 @@ async def startup() -> None:
     LOGGER.info("Database indexes ready")
 
 
+async def after_startup() -> None:
+    global bot_username
+    me = await app.get_me()
+    bot_username = me.username
+    LOGGER.info(
+        "Authorized bot: @%s (%s) | force_sub_channels=%s",
+        me.username,
+        me.id,
+        settings.force_sub_channels,
+    )
+
+
 async def shutdown() -> None:
     if http_session and not http_session.closed:
         await http_session.close()
@@ -361,6 +411,7 @@ async def run() -> None:
     await startup()
     try:
         async with app:
+            await after_startup()
             LOGGER.info("Bot started")
             await idle()
     finally:
