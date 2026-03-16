@@ -13,8 +13,8 @@ asyncio.set_event_loop(MAIN_LOOP)
 
 from pyrogram import Client, filters, idle
 from pyrogram.enums import ChatMemberStatus, ChatType, ParseMode
-from pyrogram.errors import MessageNotModified
-from pyrogram.types import CallbackQuery, Message
+from pyrogram.errors import FloodWait, MessageNotModified
+from pyrogram.types import BotCommand, CallbackQuery, Message
 
 from bot.config import Settings, configure_logging
 from bot.database import Database
@@ -162,6 +162,10 @@ async def reply_private_only(message: Message) -> None:
     )
 
 
+def is_owner(user_id: int) -> bool:
+    return user_id in settings.owner_ids
+
+
 def api_key_prompt_text() -> str:
     return (
         "Send your Heroku API key in this chat.\n"
@@ -170,6 +174,8 @@ def api_key_prompt_text() -> str:
         "<code>`HRKU-...`</code>\n"
         "<code>key: HRKU-...</code>"
     )
+
+
 def normalize_heroku_api_key(raw_text: str) -> str:
     """
     Clean Heroku API key pasted by users in Telegram.
@@ -288,11 +294,78 @@ async def render_app_panel(callback_query: CallbackQuery, user_id: int, app_name
         await callback_query.message.edit_text(info, reply_markup=app_actions_keyboard(app_name))
 
 
+async def set_bot_commands() -> None:
+    commands = [
+        BotCommand("start", "Start the bot"),
+        BotCommand("myapps", "Connect API and manage apps"),
+        BotCommand("help", "Show help"),
+        BotCommand("ping", "Check bot status"),
+        BotCommand("broadcast", "Admin only broadcast"),
+    ]
+    await app.set_bot_commands(commands)
+
+
+async def broadcast_message(message: Message, body: str | None) -> None:
+    if not is_owner(message.from_user.id):
+        await message.reply_text("This command is only for bot owners.")
+        return
+
+    if message.reply_to_message:
+        source_message = message.reply_to_message
+        text_body = None
+    else:
+        source_message = None
+        text_body = (body or "").strip()
+
+    if not source_message and not text_body:
+        await message.reply_text(
+            "Use <code>/broadcast your message</code> or reply to a message with <code>/broadcast</code>."
+        )
+        return
+
+    sent = 0
+    failed = 0
+    skipped = 0
+
+    status = await message.reply_text("Broadcast started...")
+
+    async for user_id in db.iter_user_ids():
+        if user_id == message.from_user.id:
+            skipped += 1
+            continue
+        try:
+            if source_message:
+                await source_message.copy(user_id)
+            else:
+                await app.send_message(user_id, text_body)
+            sent += 1
+        except FloodWait as exc:
+            await asyncio.sleep(exc.value)
+            try:
+                if source_message:
+                    await source_message.copy(user_id)
+                else:
+                    await app.send_message(user_id, text_body)
+                sent += 1
+            except Exception:
+                failed += 1
+        except Exception:
+            failed += 1
+
+    await status.edit_text(
+        "Broadcast completed.\n"
+        f"Sent: <b>{sent}</b>\n"
+        f"Failed: <b>{failed}</b>\n"
+        f"Skipped: <b>{skipped}</b>"
+    )
+
+
 @app.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message) -> None:
     if not is_private_message(message):
         await reply_private_only(message)
         return
+    await db.register_user(message.from_user)
     if not await require_subscription(message):
         return
 
@@ -331,6 +404,15 @@ async def help_handler(client: Client, message: Message) -> None:
 @app.on_message(filters.command("ping"))
 async def ping_handler(client: Client, message: Message) -> None:
     await message.reply_text("Bot is online.")
+
+
+@app.on_message(filters.command("broadcast"))
+async def broadcast_handler(client: Client, message: Message) -> None:
+    if not is_private_message(message):
+        await reply_private_only(message)
+        return
+    body = message.text.split(maxsplit=1)[1] if message.text and " " in message.text else None
+    await broadcast_message(message, body)
 
 
 @app.on_message(group=-1)
@@ -496,11 +578,13 @@ async def after_startup() -> None:
     global bot_username
     me = await app.get_me()
     bot_username = me.username
+    await set_bot_commands()
     LOGGER.info(
-        "Authorized bot: @%s (%s) | force_sub_channels=%s",
+        "Authorized bot: @%s (%s) | force_sub_channels=%s | owner_ids=%s",
         me.username,
         me.id,
         settings.force_sub_channels,
+        settings.owner_ids,
     )
 
 

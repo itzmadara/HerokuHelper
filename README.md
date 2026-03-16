@@ -5,7 +5,10 @@ Pyrogram Telegram bot that lets users connect their Heroku API key, save it in M
 ## Features
 
 - `/start` welcome flow with force-subscription support for one or more channels.
+- `/start` stores the user in MongoDB for future broadcasts.
 - `/myapps` prompts users to add a Heroku API key if they have not connected one yet.
+- Automatic Telegram bot command setup on startup.
+- Owner-only `/broadcast` command for sending a message to all saved users.
 - Lists Heroku apps in inline buttons with up to 6 buttons per row.
 - App panel for:
   - dyno start
@@ -40,6 +43,12 @@ python -m bot.main
 - Set `FORCE_SUB_CHANNELS` to a comma-separated list of usernames or channel IDs.
 - Set `FORCE_SUB_LINKS` to matching invite links if you want join buttons.
 - The bot checks membership before allowing `/start`, `/myapps`, and callback actions.
+
+## Broadcast
+
+- Set `OWNER_IDS` to one or more Telegram user IDs separated by commas.
+- Use `/broadcast your text here` to send a text broadcast.
+- You can also reply to any message with `/broadcast` to forward that message to all saved users.
 
 ## Notes
 

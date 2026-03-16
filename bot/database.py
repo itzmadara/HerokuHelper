@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -16,6 +17,34 @@ class Database:
 
     async def get_user(self, user_id: int) -> dict[str, Any] | None:
         return await self.users.find_one({"user_id": user_id})
+
+    async def register_user(self, user: Any) -> None:
+        now = datetime.now(timezone.utc)
+        full_name = " ".join(
+            part for part in [getattr(user, "first_name", None), getattr(user, "last_name", None)] if part
+        ).strip()
+        await self.users.update_one(
+            {"user_id": user.id},
+            {
+                "$set": {
+                    "user_id": user.id,
+                    "username": getattr(user, "username", None),
+                    "first_name": getattr(user, "first_name", None),
+                    "last_name": getattr(user, "last_name", None),
+                    "full_name": full_name or getattr(user, "first_name", None),
+                    "last_seen_at": now,
+                },
+                "$setOnInsert": {"started_at": now},
+            },
+            upsert=True,
+        )
+
+    async def iter_user_ids(self):
+        cursor = self.users.find({"user_id": {"$exists": True}}, {"user_id": 1, "_id": 0})
+        async for document in cursor:
+            user_id = document.get("user_id")
+            if isinstance(user_id, int):
+                yield user_id
 
     async def get_state(self, user_id: int) -> str | None:
         user = await self.get_user(user_id)

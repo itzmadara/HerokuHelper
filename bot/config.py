@@ -45,6 +45,7 @@ class Settings:
     mongo_uri: str
     mongo_db: str
     session_name: str
+    owner_ids: list[int]
     force_sub_channels: list[str]
     force_sub_links: list[str]
     log_level: str
@@ -58,6 +59,7 @@ class Settings:
             mongo_uri=_get_required("MONGO_URI"),
             mongo_db=os.getenv("MONGO_DB", "heroku_helper_bot"),
             session_name=os.getenv("SESSION_NAME", "heroku-helper-bot"),
+            owner_ids=[int(item) for item in _split_csv(os.getenv("OWNER_IDS"))],
             force_sub_channels=_split_csv(os.getenv("FORCE_SUB_CHANNELS")),
             force_sub_links=_split_csv(os.getenv("FORCE_SUB_LINKS")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
