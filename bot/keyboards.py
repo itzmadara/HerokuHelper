@@ -36,7 +36,7 @@ def apps_keyboard(apps: list[dict], page: int, page_size: int = 24) -> InlineKey
         InlineKeyboardButton(app["name"], callback_data=f"app:{app['name']}")
         for app in page_apps
     ]
-    rows = _chunk(buttons, 6)
+    rows = _chunk(buttons, 3)
 
     nav_row: list[InlineKeyboardButton] = []
     if page > 0:
