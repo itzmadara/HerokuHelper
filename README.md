@@ -27,7 +27,9 @@ Pyrogram Telegram bot that lets users connect their Heroku API key, save it in M
 pip install -r requirements.txt
 ```
 
-6. Run the bot:
+6. Use Python 3.13 for local/dev or let Heroku read `runtime.txt`.
+
+7. Run the bot:
 
 ```bash
 python -m bot.main
