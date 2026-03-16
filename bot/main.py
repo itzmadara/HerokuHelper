@@ -163,7 +163,30 @@ async def reply_private_only(message: Message) -> None:
 
 
 def normalize_heroku_api_key(raw_text: str) -> str:
-    return raw_text.strip().replace("`", "").replace('"', "")
+    """
+    Clean Heroku API key pasted by users in Telegram.
+
+    Removes:
+    - invisible unicode characters
+    - backticks or quotes
+    - spaces or newlines
+    """
+
+    if not raw_text:
+        return ""
+
+    key = raw_text.strip()
+
+    # remove invisible characters sometimes added by Telegram
+    key = key.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+
+    # remove formatting characters
+    key = key.replace("`", "").replace('"', "").replace("'", "")
+
+    # remove spaces and newlines
+    key = key.replace("\n", "").replace("\r", "").strip()
+
+    return key
 
 
 def format_formation(formation: list[dict]) -> str:
