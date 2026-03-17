@@ -22,13 +22,20 @@ from bot.heroku import HerokuAPIError, HerokuClient
 from bot.keyboards import (
     add_api_keyboard,
     api_prompt_keyboard,
+    app_input_keyboard,
     app_actions_keyboard,
     apps_keyboard,
     force_sub_keyboard,
+    var_detail_keyboard,
+    var_edit_keyboard,
+    vars_keyboard,
 )
 
 LOGGER = logging.getLogger(__name__)
 WAITING_API_STATE = "waiting_api_key"
+WAITING_SET_VAR_PREFIX = "waiting_set_var"
+WAITING_DEL_VAR_PREFIX = "waiting_del_var"
+WAITING_EDIT_VAR_PREFIX = "waiting_edit_var"
 bot_username: str | None = None
 
 settings = Settings.from_env()
@@ -203,6 +210,32 @@ def normalize_heroku_api_key(raw_text: str) -> str:
     return key
 
 
+def state_for(prefix: str, app_name: str) -> str:
+    return f"{prefix}:{app_name}"
+
+
+def app_from_state(state: str | None, prefix: str) -> str | None:
+    marker = f"{prefix}:"
+    if state and state.startswith(marker):
+        return state[len(marker) :]
+    return None
+
+
+def state_for_var(prefix: str, app_name: str, var_name: str) -> str:
+    return f"{prefix}:{app_name}:{var_name}"
+
+
+def var_from_state(state: str | None, prefix: str) -> tuple[str, str] | None:
+    marker = f"{prefix}:"
+    if not state or not state.startswith(marker):
+        return None
+    payload = state[len(marker) :]
+    app_name, sep, var_name = payload.partition(":")
+    if not sep or not app_name or not var_name:
+        return None
+    return app_name, var_name
+
+
 def format_formation(formation: list[dict]) -> str:
     if not formation:
         return "No dynos found."
@@ -212,6 +245,12 @@ def format_formation(formation: list[dict]) -> str:
         size = item.get("size", "?")
         parts.append(f"{item['type']}: {quantity} dyno(s) [{size}]")
     return "\n".join(parts)
+
+
+def format_var_value(value: str) -> str:
+    if len(value) <= 3000:
+        return value
+    return f"{value[:3000]}\n\n...truncated..."
 
 
 def current_stack(app_data: dict) -> str:
@@ -279,19 +318,74 @@ async def render_app_panel(callback_query: CallbackQuery, user_id: int, app_name
     heroku = await get_heroku_client(user_id)
     app_data = await heroku.get_app(app_name)
     formation = await heroku.get_formation(app_name)
+    config_vars = await heroku.get_config_vars(app_name)
 
     web_url = app_data.get("web_url") or "Not available"
     region = (app_data.get("region") or {}).get("name", "Unknown")
     stack = current_stack(app_data)
+    var_names = sorted(config_vars.keys())
+    config_preview = ", ".join(var_names[:6]) if var_names else "No config vars"
+    if len(var_names) > 6:
+        config_preview += ", ..."
     info = (
         f"<b>{html.escape(app_name)}</b>\n"
         f"Region: <code>{html.escape(region)}</code>\n"
         f"Stack: <code>{html.escape(stack)}</code>\n"
         f"URL: <code>{html.escape(web_url)}</code>\n\n"
+        f"<b>Config Vars</b>: <code>{len(var_names)}</code>\n"
+        f"<code>{html.escape(config_preview)}</code>\n\n"
         f"<b>Dyno Formation</b>\n{html.escape(format_formation(formation))}"
     )
     with suppress(MessageNotModified):
         await callback_query.message.edit_text(info, reply_markup=app_actions_keyboard(app_name))
+
+
+async def render_vars_panel(callback_query: CallbackQuery, user_id: int, app_name: str, page: int = 0) -> None:
+    heroku = await get_heroku_client(user_id)
+    config_vars = await heroku.get_config_vars(app_name)
+    var_names = sorted(config_vars.keys())
+    await db.save_var_keys(user_id, app_name, var_names)
+
+    if not var_names:
+        with suppress(MessageNotModified):
+            await callback_query.message.edit_text(
+                f"<b>{html.escape(app_name)}</b>\nNo config vars found.",
+                reply_markup=app_input_keyboard(app_name),
+            )
+        return
+
+    text = (
+        f"<b>{html.escape(app_name)}</b>\n"
+        f"Config vars: <b>{len(var_names)}</b>\n\n"
+        "Choose a variable to view its full value."
+    )
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(text, reply_markup=vars_keyboard(app_name, var_names, page))
+
+
+async def render_var_detail(
+    callback_query: CallbackQuery,
+    user_id: int,
+    app_name: str,
+    index: int,
+) -> None:
+    heroku = await get_heroku_client(user_id)
+    config_vars = await heroku.get_config_vars(app_name)
+    var_names = sorted(config_vars.keys())
+    await db.save_var_keys(user_id, app_name, var_names)
+
+    if index < 0 or index >= len(var_names):
+        raise HerokuAPIError("Variable not found.")
+
+    var_name = var_names[index]
+    value = str(config_vars.get(var_name, ""))
+    text = (
+        f"<b>{html.escape(app_name)}</b>\n"
+        f"<b>{html.escape(var_name)}</b>\n\n"
+        f"<code>{html.escape(format_var_value(value))}</code>"
+    )
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(text, reply_markup=var_detail_keyboard(app_name, index))
 
 
 async def set_bot_commands() -> None:
@@ -427,12 +521,70 @@ async def incoming_update_logger(client: Client, message: Message) -> None:
     )
 
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "myapps", "help"]))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "myapps", "help", "ping", "broadcast"]))
 async def api_capture_handler(client: Client, message: Message) -> None:
     if not await require_subscription(message):
         return
 
     state = await db.get_state(message.from_user.id)
+    set_var_app = app_from_state(state, WAITING_SET_VAR_PREFIX)
+    del_var_app = app_from_state(state, WAITING_DEL_VAR_PREFIX)
+    edit_var_data = var_from_state(state, WAITING_EDIT_VAR_PREFIX)
+
+    if set_var_app:
+        if "=" not in message.text:
+            await message.reply_text(
+                "Send config vars in this format:\n<code>KEY=VALUE</code>",
+                reply_markup=app_input_keyboard(set_var_app),
+            )
+            return
+
+        key, value = message.text.split("=", maxsplit=1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            await message.reply_text(
+                "Config var name cannot be empty.\nUse <code>KEY=VALUE</code>.",
+                reply_markup=app_input_keyboard(set_var_app),
+            )
+            return
+
+        heroku = await get_heroku_client(message.from_user.id)
+        await heroku.update_config_vars(set_var_app, {key: value})
+        await db.set_state(message.from_user.id, None)
+        await message.reply_text(
+            f"Config var <code>{html.escape(key)}</code> updated for <b>{html.escape(set_var_app)}</b>."
+        )
+        return
+
+    if del_var_app:
+        key = message.text.strip()
+        if not key:
+            await message.reply_text(
+                "Send the config var name you want to remove.\nExample: <code>DATABASE_URL</code>",
+                reply_markup=app_input_keyboard(del_var_app),
+            )
+            return
+
+        heroku = await get_heroku_client(message.from_user.id)
+        await heroku.update_config_vars(del_var_app, {key: None})
+        await db.set_state(message.from_user.id, None)
+        await message.reply_text(
+            f"Config var <code>{html.escape(key)}</code> removed from <b>{html.escape(del_var_app)}</b>."
+        )
+        return
+
+    if edit_var_data:
+        app_name, var_name = edit_var_data
+        value = message.text.strip()
+        heroku = await get_heroku_client(message.from_user.id)
+        await heroku.update_config_vars(app_name, {var_name: value})
+        await db.set_state(message.from_user.id, None)
+        await message.reply_text(
+            f"Config var <code>{html.escape(var_name)}</code> updated for <b>{html.escape(app_name)}</b>."
+        )
+        return
+
     if state != WAITING_API_STATE:
         return
 
@@ -513,6 +665,7 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
             return
 
         if data == "apps:back":
+            await db.set_state(user_id, None)
             await render_apps_in_place(callback_query, user_id)
             await callback_query.answer()
             return
@@ -525,8 +678,53 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
 
         if data.startswith("app:"):
             app_name = data.split(":", maxsplit=1)[1]
+            await db.set_state(user_id, None)
             await render_app_panel(callback_query, user_id, app_name)
             await callback_query.answer()
+            return
+
+        if data.startswith("vars:"):
+            _, app_name, page_str = data.split(":", maxsplit=2)
+            await db.set_state(user_id, None)
+            await render_vars_panel(callback_query, user_id, app_name, page=int(page_str))
+            await callback_query.answer()
+            return
+
+        if data.startswith("varshow:"):
+            _, app_name, index_str = data.split(":", maxsplit=2)
+            await db.set_state(user_id, None)
+            await render_var_detail(callback_query, user_id, app_name, int(index_str))
+            await callback_query.answer()
+            return
+
+        if data.startswith("varedit:"):
+            _, app_name, index_str = data.split(":", maxsplit=2)
+            index = int(index_str)
+            var_names = await db.get_var_keys(user_id, app_name)
+            if index < 0 or index >= len(var_names):
+                raise HerokuAPIError("Variable not found.")
+            var_name = var_names[index]
+            await db.set_state(user_id, state_for_var(WAITING_EDIT_VAR_PREFIX, app_name, var_name))
+            with suppress(MessageNotModified):
+                await callback_query.message.edit_text(
+                    f"Send the new value for <code>{html.escape(var_name)}</code> in <b>{html.escape(app_name)}</b>.",
+                    reply_markup=var_edit_keyboard(app_name, index),
+                )
+            await callback_query.answer("Send the new value.")
+            return
+
+        if data.startswith("vardel:"):
+            _, app_name, index_str = data.split(":", maxsplit=2)
+            index = int(index_str)
+            var_names = await db.get_var_keys(user_id, app_name)
+            if index < 0 or index >= len(var_names):
+                raise HerokuAPIError("Variable not found.")
+            var_name = var_names[index]
+            heroku = await get_heroku_client(user_id)
+            await heroku.update_config_vars(app_name, {var_name: None})
+            await db.set_state(user_id, None)
+            await callback_query.answer("Variable removed.")
+            await render_vars_panel(callback_query, user_id, app_name)
             return
 
         if data.startswith("action:"):
@@ -544,6 +742,34 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
             elif action == "restart":
                 await heroku.restart_dynos(app_name)
                 await callback_query.answer("Dynos restarted.")
+            elif action == "redeploy":
+                await heroku.redeploy_app(app_name)
+                await callback_query.answer("Redeploy requested.")
+            elif action == "setvar":
+                await db.set_state(user_id, state_for(WAITING_SET_VAR_PREFIX, app_name))
+                with suppress(MessageNotModified):
+                    await callback_query.message.edit_text(
+                        f"Send the config var for <b>{html.escape(app_name)}</b> like this:\n"
+                        "<code>KEY=VALUE</code>",
+                        reply_markup=app_input_keyboard(app_name),
+                    )
+                await callback_query.answer("Send KEY=VALUE.")
+                return
+            elif action == "delvar":
+                await db.set_state(user_id, state_for(WAITING_DEL_VAR_PREFIX, app_name))
+                with suppress(MessageNotModified):
+                    await callback_query.message.edit_text(
+                        f"Send the config var name you want to remove from <b>{html.escape(app_name)}</b>.\n"
+                        "Example: <code>DATABASE_URL</code>",
+                        reply_markup=app_input_keyboard(app_name),
+                    )
+                await callback_query.answer("Send the var name.")
+                return
+            elif action == "viewvars":
+                await db.set_state(user_id, None)
+                await render_vars_panel(callback_query, user_id, app_name)
+                await callback_query.answer()
+                return
             elif action == "stack24":
                 await heroku.change_stack(app_name, "heroku-24")
                 await callback_query.answer("Stack change requested.")

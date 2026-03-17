@@ -72,6 +72,55 @@ class HerokuClient:
     async def get_formation(self, app_name: str) -> list[dict[str, Any]]:
         return await self._request("GET", f"/apps/{app_name}/formation")
 
+    async def get_config_vars(self, app_name: str) -> dict[str, str]:
+        return await self._request("GET", f"/apps/{app_name}/config-vars")
+
+    async def update_config_vars(
+        self,
+        app_name: str,
+        updates: dict[str, str | None],
+    ) -> dict[str, str]:
+        return await self._request(
+            "PATCH",
+            f"/apps/{app_name}/config-vars",
+            json_data=updates,
+        )
+
+    async def list_releases(self, app_name: str) -> list[dict[str, Any]]:
+        return await self._request("GET", f"/apps/{app_name}/releases")
+
+    async def redeploy_app(self, app_name: str) -> dict[str, Any]:
+        releases = await self.list_releases(app_name)
+        current_release = next((release for release in releases if release.get("current")), None)
+        if not current_release and releases:
+            current_release = releases[0]
+        if not current_release:
+            raise HerokuAPIError("No releases found for this app.")
+
+        payload: dict[str, Any] = {"description": "Redeploy triggered from Telegram bot"}
+        slug = (current_release.get("slug") or {}).get("id")
+        oci_image = (current_release.get("oci_image") or {}).get("id")
+
+        if not slug and not oci_image:
+            for artifact in current_release.get("artifacts", []):
+                if artifact.get("type") == "slug" and artifact.get("id"):
+                    slug = artifact["id"]
+                if artifact.get("type") == "oci_image" and artifact.get("id"):
+                    oci_image = artifact["id"]
+
+        if slug:
+            payload["slug"] = slug
+        elif oci_image:
+            payload["oci_image"] = oci_image
+        else:
+            raise HerokuAPIError("No slug or OCI image found to redeploy.")
+
+        return await self._request(
+            "POST",
+            f"/apps/{app_name}/releases",
+            json_data=payload,
+        )
+
     async def restart_dynos(self, app_name: str) -> None:
         await self._request("DELETE", f"/apps/{app_name}/dynos")
 

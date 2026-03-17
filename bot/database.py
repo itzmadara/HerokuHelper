@@ -50,6 +50,19 @@ class Database:
         user = await self.get_user(user_id)
         return user.get("state") if user else None
 
+    async def save_var_keys(self, user_id: int, app_name: str, keys: list[str]) -> None:
+        await self.users.update_one(
+            {"user_id": user_id},
+            {"$set": {f"ui_var_keys.{app_name}": keys}},
+            upsert=True,
+        )
+
+    async def get_var_keys(self, user_id: int, app_name: str) -> list[str]:
+        user = await self.get_user(user_id)
+        if not user:
+            return []
+        return user.get("ui_var_keys", {}).get(app_name, [])
+
     async def set_state(self, user_id: int, state: str | None) -> None:
         await self.users.update_one(
             {"user_id": user_id},
