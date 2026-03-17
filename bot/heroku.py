@@ -89,31 +89,48 @@ class HerokuClient:
     async def list_releases(self, app_name: str) -> list[dict[str, Any]]:
         return await self._request("GET", f"/apps/{app_name}/releases")
 
+    @staticmethod
+    def _release_artifact(release: dict[str, Any]) -> tuple[str, str] | None:
+        slug = (release.get("slug") or {}).get("id")
+        if slug:
+            return ("slug", slug)
+
+        oci_image = (release.get("oci_image") or {}).get("id")
+        if oci_image:
+            return ("oci_image", oci_image)
+
+        for artifact in release.get("artifacts", []):
+            artifact_type = artifact.get("type")
+            artifact_id = artifact.get("id")
+            if artifact_type in {"slug", "oci_image"} and artifact_id:
+                return (artifact_type, artifact_id)
+
+        return None
+
     async def redeploy_app(self, app_name: str) -> dict[str, Any]:
         releases = await self.list_releases(app_name)
         current_release = next((release for release in releases if release.get("current")), None)
         if not current_release and releases:
             current_release = releases[0]
-        if not current_release:
+        if not releases:
             raise HerokuAPIError("No releases found for this app.")
 
         payload: dict[str, Any] = {"description": "Redeploy triggered from Telegram bot"}
-        slug = (current_release.get("slug") or {}).get("id")
-        oci_image = (current_release.get("oci_image") or {}).get("id")
+        artifact = self._release_artifact(current_release) if current_release else None
 
-        if not slug and not oci_image:
-            for artifact in current_release.get("artifacts", []):
-                if artifact.get("type") == "slug" and artifact.get("id"):
-                    slug = artifact["id"]
-                if artifact.get("type") == "oci_image" and artifact.get("id"):
-                    oci_image = artifact["id"]
+        if not artifact:
+            for release in releases:
+                artifact = self._release_artifact(release)
+                if artifact:
+                    break
 
-        if slug:
-            payload["slug"] = slug
-        elif oci_image:
-            payload["oci_image"] = oci_image
-        else:
-            raise HerokuAPIError("No slug or OCI image found to redeploy.")
+        if not artifact:
+            raise HerokuAPIError(
+                "No redeployable release artifact was found. Heroku may have expired the app's old slug/OCI image."
+            )
+
+        artifact_type, artifact_id = artifact
+        payload[artifact_type] = artifact_id
 
         return await self._request(
             "POST",

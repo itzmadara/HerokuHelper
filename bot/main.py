@@ -787,7 +787,7 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
 
         await callback_query.answer("Unknown button.", show_alert=True)
     except HerokuAPIError as exc:
-        LOGGER.exception("Heroku API error while handling callback")
+        LOGGER.warning("Heroku API error while handling callback: %s", exc)
         await callback_query.answer(str(exc), show_alert=True)
     except Exception as exc:
         LOGGER.exception("Unexpected callback error")
