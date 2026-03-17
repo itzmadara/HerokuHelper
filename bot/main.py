@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import re
+from io import BytesIO
 from contextlib import suppress
 
 import aiohttp
@@ -253,6 +254,12 @@ def format_var_value(value: str) -> str:
     return f"{value[:3000]}\n\n...truncated..."
 
 
+def format_log_preview(log_text: str, limit: int = 3500) -> str:
+    if len(log_text) <= limit:
+        return log_text
+    return f"{log_text[-limit:]}\n\n...truncated to recent lines..."
+
+
 def current_stack(app_data: dict) -> str:
     build_stack = app_data.get("build_stack") or {}
     stack = app_data.get("stack") or {}
@@ -386,6 +393,54 @@ async def render_var_detail(
     )
     with suppress(MessageNotModified):
         await callback_query.message.edit_text(text, reply_markup=var_detail_keyboard(app_name, index))
+
+
+async def monitor_redeploy(
+    user_id: int,
+    chat_id: int,
+    app_name: str,
+    release_id: str,
+    release_version: int | None,
+) -> None:
+    try:
+        heroku = await get_heroku_client(user_id)
+        for _ in range(24):
+            await asyncio.sleep(5)
+            release = await heroku.get_release(app_name, release_id)
+            status = str(release.get("status", "")).lower()
+            version = release.get("version") or release_version or "?"
+
+            if status == "succeeded":
+                await app.send_message(
+                    chat_id,
+                    f"<b>{html.escape(app_name)}</b> redeploy completed successfully.\n"
+                    f"Release: <code>v{version}</code>",
+                )
+                return
+
+            if status in {"failed", "expired"}:
+                failure_message = release.get("failure_message") or release.get("description") or "No failure details."
+                await app.send_message(
+                    chat_id,
+                    f"<b>{html.escape(app_name)}</b> redeploy {html.escape(status)}.\n"
+                    f"Release: <code>v{version}</code>\n"
+                    f"Reason: <code>{html.escape(str(failure_message))}</code>",
+                )
+                return
+
+        await app.send_message(
+            chat_id,
+            f"<b>{html.escape(app_name)}</b> redeploy is still pending.\n"
+            "Check the app panel again in a bit for the latest status.",
+        )
+    except Exception as exc:
+        LOGGER.warning("Redeploy monitor failed for %s: %s", app_name, exc)
+        with suppress(Exception):
+            await app.send_message(
+                chat_id,
+                f"<b>{html.escape(app_name)}</b> redeploy monitor stopped.\n"
+                f"Reason: <code>{html.escape(str(exc))}</code>",
+            )
 
 
 async def set_bot_commands() -> None:
@@ -743,8 +798,44 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                 await heroku.restart_dynos(app_name)
                 await callback_query.answer("Dynos restarted.")
             elif action == "redeploy":
-                await heroku.redeploy_app(app_name)
+                release = await heroku.redeploy_app(app_name)
+                release_id = release.get("id")
+                release_version = release.get("version")
+                if release_id:
+                    asyncio.create_task(
+                        monitor_redeploy(
+                            user_id,
+                            callback_query.message.chat.id,
+                            app_name,
+                            release_id,
+                            release_version,
+                        )
+                    )
                 await callback_query.answer("Redeploy requested.")
+                await callback_query.message.reply_text(
+                    f"Redeploy started for <b>{html.escape(app_name)}</b>.\n"
+                    "I will send you another message when it completes."
+                )
+            elif action == "logs":
+                log_text = await heroku.get_logs(app_name, lines=120, source="app", tail=False)
+                preview = format_log_preview(log_text or "No logs available.")
+                await callback_query.message.reply_text(
+                    f"<b>{html.escape(app_name)} recent logs</b>\n\n"
+                    f"<pre>{html.escape(preview)}</pre>"
+                )
+                await callback_query.answer("Recent logs sent.")
+                return
+            elif action == "logfile":
+                log_text = await heroku.get_logs(app_name, lines=400, source="app", tail=False)
+                payload = BytesIO((log_text or "No logs available.\n").encode("utf-8"))
+                payload.name = f"{app_name}-log.txt"
+                await callback_query.message.reply_document(
+                    payload,
+                    caption=f"{app_name} logs",
+                    file_name=f"{app_name}-log.txt",
+                )
+                await callback_query.answer("Log file sent.")
+                return
             elif action == "setvar":
                 await db.set_state(user_id, state_for(WAITING_SET_VAR_PREFIX, app_name))
                 with suppress(MessageNotModified):

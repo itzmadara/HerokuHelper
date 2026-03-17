@@ -89,6 +89,51 @@ class HerokuClient:
     async def list_releases(self, app_name: str) -> list[dict[str, Any]]:
         return await self._request("GET", f"/apps/{app_name}/releases")
 
+    async def get_release(self, app_name: str, release_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/apps/{app_name}/releases/{release_id}")
+
+    async def create_log_session(
+        self,
+        app_name: str,
+        *,
+        lines: int = 100,
+        source: str = "app",
+        tail: bool = False,
+    ) -> dict[str, Any]:
+        payload = {
+            "lines": lines,
+            "source": source,
+            "tail": tail,
+        }
+        return await self._request(
+            "POST",
+            f"/apps/{app_name}/log-sessions",
+            json_data=payload,
+        )
+
+    async def get_logs(
+        self,
+        app_name: str,
+        *,
+        lines: int = 100,
+        source: str = "app",
+        tail: bool = False,
+    ) -> str:
+        session_info = await self.create_log_session(
+            app_name,
+            lines=lines,
+            source=source,
+            tail=tail,
+        )
+        logplex_url = session_info.get("logplex_url")
+        if not logplex_url:
+            raise HerokuAPIError("Heroku did not return a log session URL.")
+
+        async with self.session.get(logplex_url) as response:
+            if response.status >= 400:
+                raise HerokuAPIError(f"Unable to fetch logs (HTTP {response.status}).")
+            return await response.text()
+
     @staticmethod
     def _release_artifact(release: dict[str, Any]) -> tuple[str, str] | None:
         slug = (release.get("slug") or {}).get("id")

@@ -126,8 +126,12 @@ def app_actions_keyboard(app_name: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("Remove Var", callback_data=f"action:delvar:{app_name}"),
+                InlineKeyboardButton("View Logs", callback_data=f"action:logs:{app_name}"),
             ],
-            [InlineKeyboardButton("Dyno On", callback_data=f"action:start:{app_name}")],
+            [
+                InlineKeyboardButton("Log File", callback_data=f"action:logfile:{app_name}"),
+                InlineKeyboardButton("Dyno On", callback_data=f"action:start:{app_name}"),
+            ],
             [InlineKeyboardButton("Dyno Off", callback_data=f"action:stop:{app_name}")],
             [InlineKeyboardButton("Restart Dynos", callback_data=f"action:restart:{app_name}")],
             [
