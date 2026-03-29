@@ -282,16 +282,16 @@ def vps_scan_results_keyboard(
         )
         for index, item in enumerate(page_items)
     ]
-    rows.extend(_chunk(buttons, 1))
+    rows.extend(_chunk(buttons, 3))
 
     nav_row: list[InlineKeyboardButton] = []
     if page > 0:
         nav_row.append(
-            InlineKeyboardButton("Previous", callback_data=f"vpsscanpage:{scan_type}:{server_id}:{page - 1}")
+            InlineKeyboardButton("《", callback_data=f"vpsscanpage:{scan_type}:{server_id}:{page - 1}")
         )
     if end < len(items):
         nav_row.append(
-            InlineKeyboardButton("Next", callback_data=f"vpsscanpage:{scan_type}:{server_id}:{page + 1}")
+            InlineKeyboardButton("》", callback_data=f"vpsscanpage:{scan_type}:{server_id}:{page + 1}")
         )
     if nav_row:
         rows.append(nav_row)
