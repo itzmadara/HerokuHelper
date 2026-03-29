@@ -124,3 +124,91 @@ class Database:
         if not user:
             return None
         return user.get("app_backups", {}).get(app_name)
+
+    async def save_vps_server(
+        self,
+        user_id: int,
+        server_id: str,
+        server_data: dict[str, Any],
+    ) -> None:
+        await self.users.update_one(
+            {"user_id": user_id},
+            {"$set": {f"vps_servers.{server_id}": server_data}},
+            upsert=True,
+        )
+
+    async def list_vps_servers(self, user_id: int) -> list[dict[str, Any]]:
+        user = await self.get_user(user_id)
+        if not user:
+            return []
+        servers = user.get("vps_servers", {})
+        if not isinstance(servers, dict):
+            return []
+        result: list[dict[str, Any]] = []
+        for server_id, server_data in servers.items():
+            if isinstance(server_data, dict):
+                result.append({"id": server_id, **server_data})
+        return sorted(result, key=lambda item: str(item.get("name", item["id"])).lower())
+
+    async def get_vps_server(self, user_id: int, server_id: str) -> dict[str, Any] | None:
+        user = await self.get_user(user_id)
+        if not user:
+            return None
+        server = user.get("vps_servers", {}).get(server_id)
+        if not isinstance(server, dict):
+            return None
+        return {"id": server_id, **server}
+
+    async def delete_vps_server(self, user_id: int, server_id: str) -> None:
+        await self.users.update_one(
+            {"user_id": user_id},
+            {
+                "$unset": {
+                    f"vps_servers.{server_id}": "",
+                    f"vps_bots.{server_id}": "",
+                }
+            },
+            upsert=True,
+        )
+
+    async def save_vps_bot(
+        self,
+        user_id: int,
+        server_id: str,
+        bot_id: str,
+        bot_data: dict[str, Any],
+    ) -> None:
+        await self.users.update_one(
+            {"user_id": user_id},
+            {"$set": {f"vps_bots.{server_id}.{bot_id}": bot_data}},
+            upsert=True,
+        )
+
+    async def list_vps_bots(self, user_id: int, server_id: str) -> list[dict[str, Any]]:
+        user = await self.get_user(user_id)
+        if not user:
+            return []
+        bots = user.get("vps_bots", {}).get(server_id, {})
+        if not isinstance(bots, dict):
+            return []
+        result: list[dict[str, Any]] = []
+        for bot_id, bot_data in bots.items():
+            if isinstance(bot_data, dict):
+                result.append({"id": bot_id, **bot_data})
+        return sorted(result, key=lambda item: str(item.get("label", item["id"])).lower())
+
+    async def get_vps_bot(self, user_id: int, server_id: str, bot_id: str) -> dict[str, Any] | None:
+        user = await self.get_user(user_id)
+        if not user:
+            return None
+        bot = user.get("vps_bots", {}).get(server_id, {}).get(bot_id)
+        if not isinstance(bot, dict):
+            return None
+        return {"id": bot_id, **bot}
+
+    async def delete_vps_bot(self, user_id: int, server_id: str, bot_id: str) -> None:
+        await self.users.update_one(
+            {"user_id": user_id},
+            {"$unset": {f"vps_bots.{server_id}.{bot_id}": ""}},
+            upsert=True,
+        )

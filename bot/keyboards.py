@@ -143,3 +143,93 @@ def app_actions_keyboard(app_name: str) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def vps_servers_keyboard(servers: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    buttons = [
+        InlineKeyboardButton(server["name"], callback_data=f"vpssrv:{server['id']}")
+        for server in servers
+    ]
+    rows.extend(_chunk(buttons, 2))
+    rows.append([InlineKeyboardButton("Add VPS", callback_data="vps:add")])
+    return InlineKeyboardMarkup(rows)
+
+
+def vps_prompt_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Back", callback_data="vps:back")]]
+    )
+
+
+def vps_server_keyboard(server_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Test SSH", callback_data=f"vpsact:test:{server_id}"),
+                InlineKeyboardButton("View Bots", callback_data=f"vpsact:bots:{server_id}"),
+            ],
+            [
+                InlineKeyboardButton("Add Bot", callback_data=f"vpsact:addbot:{server_id}"),
+                InlineKeyboardButton("Sessions", callback_data=f"vpsact:sessions:{server_id}"),
+            ],
+            [
+                InlineKeyboardButton("Containers", callback_data=f"vpsact:containers:{server_id}"),
+            ],
+            [
+                InlineKeyboardButton("Delete VPS", callback_data=f"vpsact:delete:{server_id}"),
+            ],
+            [
+                InlineKeyboardButton("Back", callback_data="vps:back"),
+            ],
+        ]
+    )
+
+
+def vps_bots_keyboard(server_id: str, bots: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    buttons = [
+        InlineKeyboardButton(bot["label"], callback_data=f"vpsbot:{server_id}:{bot['id']}")
+        for bot in bots
+    ]
+    rows.extend(_chunk(buttons, 2))
+    rows.append([InlineKeyboardButton("Add Bot", callback_data=f"vpsact:addbot:{server_id}")])
+    rows.append([InlineKeyboardButton("Back", callback_data=f"vpssrv:{server_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def vps_bot_prompt_keyboard(server_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Back", callback_data=f"vpssrv:{server_id}")]]
+    )
+
+
+def vps_bot_keyboard(server_id: str, bot_id: str, manager_type: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton("Start", callback_data=f"vpsbotact:start:{server_id}:{bot_id}"),
+            InlineKeyboardButton("Stop", callback_data=f"vpsbotact:stop:{server_id}:{bot_id}"),
+        ],
+        [
+            InlineKeyboardButton("Restart", callback_data=f"vpsbotact:restart:{server_id}:{bot_id}"),
+            InlineKeyboardButton("Status", callback_data=f"vpsbotact:status:{server_id}:{bot_id}"),
+        ],
+    ]
+
+    if manager_type == "docker":
+        rows.append(
+            [
+                InlineKeyboardButton("Logs", callback_data=f"vpsbotact:logs:{server_id}:{bot_id}"),
+                InlineKeyboardButton("Delete", callback_data=f"vpsbotact:delete:{server_id}:{bot_id}"),
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton("Capture", callback_data=f"vpsbotact:capture:{server_id}:{bot_id}"),
+                InlineKeyboardButton("Delete", callback_data=f"vpsbotact:delete:{server_id}:{bot_id}"),
+            ]
+        )
+
+    rows.append([InlineKeyboardButton("Back", callback_data=f"vpsact:bots:{server_id}")])
+    return InlineKeyboardMarkup(rows)

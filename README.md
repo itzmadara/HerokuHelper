@@ -1,12 +1,14 @@
 # Heroku Helper Bot
 
 Pyrogram Telegram bot that lets users connect their Heroku API key, save it in MongoDB, list their apps, and manage basic actions from inline buttons.
+It also supports saving VPS servers and controlling `screen`-managed or Docker-based bot processes over SSH.
 
 ## Features
 
 - `/start` welcome flow with force-subscription support for one or more channels.
 - `/start` stores the user in MongoDB for future broadcasts.
 - `/myapps` prompts users to add a Heroku API key if they have not connected one yet.
+- `/myvps` lets users save VPS credentials and manage `screen` or Docker bots.
 - Automatic Telegram bot command setup on startup.
 - Owner-only `/broadcast` command for sending a message to all saved users.
 - Lists Heroku apps in inline buttons with up to 6 buttons per row.
@@ -17,6 +19,7 @@ Pyrogram Telegram bot that lets users connect their Heroku API key, save it in M
   - stack switch to `heroku-24`
   - stack switch to `container` (Docker)
 - MongoDB storage for user API keys, state, and previous dyno quantities.
+- MongoDB storage for VPS server credentials and saved VPS bot definitions.
 
 ## Setup
 
@@ -53,5 +56,8 @@ python -m bot.main
 ## Notes
 
 - Heroku API keys are stored in MongoDB because the bot needs them to manage user apps.
+- VPS passwords are also stored in MongoDB so the bot can open SSH sessions on behalf of the user.
 - For production, use a private MongoDB deployment and restrict database access.
 - Changing stacks on Heroku can trigger rebuild or release-related behavior depending on the app.
+- VPS `screen` support expects the remote server to have `screen` installed and available in `PATH`.
+- Docker support expects the remote server user to be allowed to run `docker` commands.

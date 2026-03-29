@@ -4,8 +4,9 @@ import asyncio
 import html
 import logging
 import re
-from io import BytesIO
 from contextlib import suppress
+from io import BytesIO
+from uuid import uuid4
 
 import aiohttp
 
@@ -30,13 +31,23 @@ from bot.keyboards import (
     var_detail_keyboard,
     var_edit_keyboard,
     vars_keyboard,
+    vps_bot_keyboard,
+    vps_bot_prompt_keyboard,
+    vps_bots_keyboard,
+    vps_prompt_keyboard,
+    vps_server_keyboard,
+    vps_servers_keyboard,
 )
+from bot.vps import DockerBotConfig, ScreenBotConfig, VPSAPIError, VPSClient, VPSServerConfig
 
 LOGGER = logging.getLogger(__name__)
 WAITING_API_STATE = "waiting_api_key"
 WAITING_SET_VAR_PREFIX = "waiting_set_var"
 WAITING_DEL_VAR_PREFIX = "waiting_del_var"
 WAITING_EDIT_VAR_PREFIX = "waiting_edit_var"
+WAITING_ADD_VPS_STATE = "waiting_add_vps"
+WAITING_ADD_SCREEN_BOT_PREFIX = "waiting_add_screen_bot"
+SCREEN_SESSION_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 bot_username: str | None = None
 
 settings = Settings.from_env()
@@ -52,6 +63,7 @@ app = Client(
 
 db = Database(settings.mongo_uri, settings.mongo_db)
 http_session: aiohttp.ClientSession | None = None
+vps_client = VPSClient()
 
 
 async def clear_bot_webhook() -> None:
@@ -237,6 +249,56 @@ def var_from_state(state: str | None, prefix: str) -> tuple[str, str] | None:
     return app_name, var_name
 
 
+def parse_mapping_message(raw_text: str) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", maxsplit=1)
+        data[key.strip().lower()] = value.strip()
+    return data
+
+
+def mask_secret(value: str) -> str:
+    if len(value) <= 4:
+        return "*" * len(value)
+    return f"{value[:2]}{'*' * (len(value) - 4)}{value[-2:]}"
+
+
+def build_server_config(server: dict) -> VPSServerConfig:
+    return VPSServerConfig(
+        name=str(server.get("name", "")),
+        host=str(server.get("host", "")),
+        username=str(server.get("username", "")),
+        password=str(server.get("password", "")),
+        port=int(server.get("port", 22)),
+    )
+
+
+def build_screen_bot_config(bot_data: dict) -> ScreenBotConfig:
+    return ScreenBotConfig(
+        label=str(bot_data.get("label", "")),
+        session_name=str(bot_data.get("session_name", "")),
+        workdir=str(bot_data.get("workdir", "")),
+        start_command=str(bot_data.get("start_command", "")),
+    )
+
+
+def build_docker_bot_config(bot_data: dict) -> DockerBotConfig:
+    return DockerBotConfig(
+        label=str(bot_data.get("label", "")),
+        container_name=str(bot_data.get("container_name", "")),
+    )
+
+
+def bot_manager_type(bot_data: dict) -> str:
+    manager_type = str(bot_data.get("manager_type", "screen")).strip().lower()
+    if manager_type not in {"screen", "docker"}:
+        return "screen"
+    return manager_type
+
+
 def format_formation(formation: list[dict]) -> str:
     if not formation:
         return "No dynos found."
@@ -347,6 +409,122 @@ async def render_app_panel(callback_query: CallbackQuery, user_id: int, app_name
         await callback_query.message.edit_text(info, reply_markup=app_actions_keyboard(app_name))
 
 
+async def render_vps_home(message: Message, user_id: int) -> None:
+    servers = await db.list_vps_servers(user_id)
+    if not servers:
+        await message.reply_text(
+            "No VPS saved yet.\n\n"
+            "Tap below and send:\n"
+            "<code>name=My VPS\nhost=1.2.3.4\nport=22\nusername=root\npassword=your-password</code>",
+            reply_markup=vps_servers_keyboard([]),
+        )
+        return
+
+    await message.reply_text(
+        f"<b>Your VPS Servers</b>\nSaved servers: <b>{len(servers)}</b>\n\nChoose a server below.",
+        reply_markup=vps_servers_keyboard(servers),
+    )
+
+
+async def render_vps_home_in_place(callback_query: CallbackQuery, user_id: int) -> None:
+    servers = await db.list_vps_servers(user_id)
+    if not servers:
+        with suppress(MessageNotModified):
+            await callback_query.message.edit_text(
+                "No VPS saved yet.\n\n"
+                "Tap below and send:\n"
+                "<code>name=My VPS\nhost=1.2.3.4\nport=22\nusername=root\npassword=your-password</code>",
+                reply_markup=vps_servers_keyboard([]),
+            )
+        return
+
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(
+            f"<b>Your VPS Servers</b>\nSaved servers: <b>{len(servers)}</b>\n\nChoose a server below.",
+            reply_markup=vps_servers_keyboard(servers),
+        )
+
+
+async def get_vps_server_or_raise(user_id: int, server_id: str) -> dict:
+    server = await db.get_vps_server(user_id, server_id)
+    if not server:
+        raise VPSAPIError("VPS server not found.")
+    return server
+
+
+async def get_vps_bot_or_raise(user_id: int, server_id: str, bot_id: str) -> dict:
+    bot_data = await db.get_vps_bot(user_id, server_id, bot_id)
+    if not bot_data:
+        raise VPSAPIError("Screen bot not found.")
+    return bot_data
+
+
+async def render_vps_server_panel(callback_query: CallbackQuery, user_id: int, server_id: str) -> None:
+    server = await get_vps_server_or_raise(user_id, server_id)
+    bots = await db.list_vps_bots(user_id, server_id)
+    text = (
+        f"<b>{html.escape(str(server.get('name', 'VPS')))}</b>\n"
+        f"Host: <code>{html.escape(str(server.get('host', '')))}</code>\n"
+        f"Port: <code>{int(server.get('port', 22))}</code>\n"
+        f"User: <code>{html.escape(str(server.get('username', '')))}</code>\n"
+        f"Password: <code>{html.escape(mask_secret(str(server.get('password', ''))))}</code>\n\n"
+        f"Saved bots: <b>{len(bots)}</b>"
+    )
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(text, reply_markup=vps_server_keyboard(server_id))
+
+
+async def render_vps_bots_panel(callback_query: CallbackQuery, user_id: int, server_id: str) -> None:
+    server = await get_vps_server_or_raise(user_id, server_id)
+    bots = await db.list_vps_bots(user_id, server_id)
+    if not bots:
+        with suppress(MessageNotModified):
+            await callback_query.message.edit_text(
+                f"<b>{html.escape(str(server.get('name', 'VPS')))}</b>\nNo saved VPS bots yet.",
+                reply_markup=vps_bots_keyboard(server_id, []),
+            )
+        return
+
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(
+            f"<b>{html.escape(str(server.get('name', 'VPS')))} bots</b>\n"
+            f"Saved bots: <b>{len(bots)}</b>\n\nChoose one below.",
+            reply_markup=vps_bots_keyboard(server_id, bots),
+        )
+
+
+async def render_vps_bot_panel(
+    callback_query: CallbackQuery,
+    user_id: int,
+    server_id: str,
+    bot_id: str,
+) -> None:
+    server = await get_vps_server_or_raise(user_id, server_id)
+    bot_data = await get_vps_bot_or_raise(user_id, server_id, bot_id)
+    manager_type = bot_manager_type(bot_data)
+    if manager_type == "docker":
+        text = (
+            f"<b>{html.escape(str(bot_data.get('label', 'Docker Bot')))}</b>\n"
+            f"Server: <code>{html.escape(str(server.get('name', '')))}</code>\n"
+            f"Manager: <code>docker</code>\n"
+            f"Container: <code>{html.escape(str(bot_data.get('container_name', '')))}</code>"
+        )
+    else:
+        text = (
+            f"<b>{html.escape(str(bot_data.get('label', 'Screen Bot')))}</b>\n"
+            f"Server: <code>{html.escape(str(server.get('name', '')))}</code>\n"
+            f"Manager: <code>screen</code>\n"
+            f"Session: <code>{html.escape(str(bot_data.get('session_name', '')))}</code>\n"
+            f"Workdir: <code>{html.escape(str(bot_data.get('workdir', '')))}</code>\n\n"
+            f"Start command:\n<code>{html.escape(str(bot_data.get('start_command', '')))}</code>"
+        )
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(
+            text,
+            reply_markup=vps_bot_keyboard(server_id, bot_id, manager_type),
+        )
+
+
 async def render_vars_panel(callback_query: CallbackQuery, user_id: int, app_name: str, page: int = 0) -> None:
     heroku = await get_heroku_client(user_id)
     config_vars = await heroku.get_config_vars(app_name)
@@ -447,6 +625,7 @@ async def set_bot_commands() -> None:
     commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("myapps", "Connect API and manage apps"),
+        BotCommand("myvps", "Manage VPS bots"),
         BotCommand("help", "Show help"),
         BotCommand("ping", "Check bot status"),
         BotCommand("broadcast", "Admin only broadcast"),
@@ -520,7 +699,7 @@ async def start_handler(client: Client, message: Message) -> None:
 
     text = (
         "Welcome to Heroku Helper Bot.\n\n"
-        "Use /myapps to connect your Heroku API key and manage your apps Directly From Telegram."
+        "Use /myapps to manage Heroku apps and /myvps to manage VPS bots directly from Telegram."
     )
     await message.reply_text(text)
 
@@ -535,6 +714,16 @@ async def myapps_handler(client: Client, message: Message) -> None:
     await render_apps(message, message.from_user.id)
 
 
+@app.on_message(filters.command("myvps"))
+async def myvps_handler(client: Client, message: Message) -> None:
+    if not is_private_message(message):
+        await reply_private_only(message)
+        return
+    if not await require_subscription(message):
+        return
+    await render_vps_home(message, message.from_user.id)
+
+
 @app.on_message(filters.command("help"))
 async def help_handler(client: Client, message: Message) -> None:
     if not is_private_message(message):
@@ -546,6 +735,7 @@ async def help_handler(client: Client, message: Message) -> None:
         "Commands:\n"
         "/start - start the bot\n"
         "/myapps - connect API key and list Heroku apps\n"
+        "/myvps - save VPS and manage screen or Docker bots\n"
         "/help - show this help"
     )
 
@@ -576,15 +766,127 @@ async def incoming_update_logger(client: Client, message: Message) -> None:
     )
 
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "myapps", "help", "ping", "broadcast"]))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "myapps", "myvps", "help", "ping", "broadcast"]))
 async def api_capture_handler(client: Client, message: Message) -> None:
     if not await require_subscription(message):
         return
 
     state = await db.get_state(message.from_user.id)
+    add_screen_bot_server = app_from_state(state, WAITING_ADD_SCREEN_BOT_PREFIX)
     set_var_app = app_from_state(state, WAITING_SET_VAR_PREFIX)
     del_var_app = app_from_state(state, WAITING_DEL_VAR_PREFIX)
     edit_var_data = var_from_state(state, WAITING_EDIT_VAR_PREFIX)
+
+    if state == WAITING_ADD_VPS_STATE:
+        fields = parse_mapping_message(message.text)
+        required_fields = ("name", "host", "username", "password")
+        if any(not fields.get(field) for field in required_fields):
+            await message.reply_text(
+                "Send VPS details like this:\n"
+                "<code>name=My VPS\nhost=1.2.3.4\nport=22\nusername=root\npassword=your-password</code>",
+                reply_markup=vps_prompt_keyboard(),
+            )
+            return
+
+        port_text = fields.get("port", "22")
+        if not port_text.isdigit():
+            await message.reply_text(
+                "Port must be a number.\nExample: <code>port=22</code>",
+                reply_markup=vps_prompt_keyboard(),
+            )
+            return
+
+        server_id = uuid4().hex[:10]
+        await db.save_vps_server(
+            message.from_user.id,
+            server_id,
+            {
+                "name": fields["name"],
+                "host": fields["host"],
+                "port": int(port_text),
+                "username": fields["username"],
+                "password": fields["password"],
+            },
+        )
+        await db.set_state(message.from_user.id, None)
+        await message.reply_text(
+            f"VPS <b>{html.escape(fields['name'])}</b> saved.\nUse /myvps to test SSH and manage bots."
+        )
+        return
+
+    if add_screen_bot_server:
+        server = await db.get_vps_server(message.from_user.id, add_screen_bot_server)
+        if not server:
+            await db.set_state(message.from_user.id, None)
+            await message.reply_text("That VPS was not found anymore. Use /myvps and try again.")
+            return
+
+        fields = parse_mapping_message(message.text)
+        manager_type = fields.get("manager", "screen").strip().lower()
+        if manager_type not in {"screen", "docker"}:
+            await message.reply_text(
+                "Manager must be <code>screen</code> or <code>docker</code>.",
+                reply_markup=vps_bot_prompt_keyboard(add_screen_bot_server),
+            )
+            return
+
+        bot_id = uuid4().hex[:10]
+        if manager_type == "docker":
+            required_fields = ("label", "container")
+            if any(not fields.get(field) for field in required_fields):
+                await message.reply_text(
+                    "Send Docker bot details like this:\n"
+                    "<code>manager=docker\nlabel=My Docker Bot\ncontainer=my-container</code>\n\n"
+                    "For screen bots use:\n"
+                    "<code>manager=screen\nlabel=My Bot\nsession=mybot\nworkdir=/root/mybot\ncommand=python3 bot.py</code>",
+                    reply_markup=vps_bot_prompt_keyboard(add_screen_bot_server),
+                )
+                return
+
+            payload = {
+                "label": fields["label"],
+                "manager_type": "docker",
+                "container_name": fields["container"],
+            }
+        else:
+            required_fields = ("label", "session", "workdir", "command")
+            if any(not fields.get(field) for field in required_fields):
+                await message.reply_text(
+                    "Send screen bot details like this:\n"
+                    "<code>manager=screen\nlabel=My Bot\nsession=mybot\nworkdir=/root/mybot\ncommand=python3 bot.py</code>\n\n"
+                    "For Docker bots use:\n"
+                    "<code>manager=docker\nlabel=My Docker Bot\ncontainer=my-container</code>",
+                    reply_markup=vps_bot_prompt_keyboard(add_screen_bot_server),
+                )
+                return
+
+            if not SCREEN_SESSION_RE.fullmatch(fields["session"]):
+                await message.reply_text(
+                    "Session name can only use letters, numbers, dot, underscore, and dash.",
+                    reply_markup=vps_bot_prompt_keyboard(add_screen_bot_server),
+                )
+                return
+
+            payload = {
+                "label": fields["label"],
+                "manager_type": "screen",
+                "session_name": fields["session"],
+                "workdir": fields["workdir"],
+                "start_command": fields["command"],
+            }
+
+        await db.save_vps_bot(
+            message.from_user.id,
+            add_screen_bot_server,
+            bot_id,
+            payload,
+        )
+        await db.set_state(message.from_user.id, None)
+        await message.reply_text(
+            f"VPS bot <b>{html.escape(fields['label'])}</b> saved for "
+            f"<b>{html.escape(str(server.get('name', 'VPS')))}</b>.\nUse /myvps to start or stop it."
+        )
+        return
 
     if set_var_app:
         if "=" not in message.text:
@@ -717,6 +1019,182 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                     reply_markup=add_api_keyboard(),
                 )
             await callback_query.answer("API key removed.")
+            return
+
+        if data == "vps:add":
+            await db.set_state(user_id, WAITING_ADD_VPS_STATE)
+            with suppress(MessageNotModified):
+                await callback_query.message.edit_text(
+                    "Send VPS details in this format:\n"
+                    "<code>name=My VPS\nhost=1.2.3.4\nport=22\nusername=root\npassword=your-password</code>",
+                    reply_markup=vps_prompt_keyboard(),
+                )
+            await callback_query.answer("Send VPS details.")
+            return
+
+        if data == "vps:back":
+            await db.set_state(user_id, None)
+            await render_vps_home_in_place(callback_query, user_id)
+            await callback_query.answer()
+            return
+
+        if data.startswith("vpssrv:"):
+            server_id = data.split(":", maxsplit=1)[1]
+            await db.set_state(user_id, None)
+            await render_vps_server_panel(callback_query, user_id, server_id)
+            await callback_query.answer()
+            return
+
+        if data.startswith("vpsact:"):
+            _, action, server_id = data.split(":", maxsplit=2)
+            server = await get_vps_server_or_raise(user_id, server_id)
+            server_config = build_server_config(server)
+
+            if action == "test":
+                result = await vps_client.test_connection(server_config)
+                await callback_query.message.reply_text(
+                    f"<b>{html.escape(str(server.get('name', 'VPS')))} SSH test</b>\n\n"
+                    f"<pre>{html.escape(result or 'Connected successfully.')}</pre>"
+                )
+                await callback_query.answer("SSH test completed.")
+                return
+            if action == "bots":
+                await db.set_state(user_id, None)
+                await render_vps_bots_panel(callback_query, user_id, server_id)
+                await callback_query.answer()
+                return
+            if action == "addbot":
+                await db.set_state(user_id, state_for(WAITING_ADD_SCREEN_BOT_PREFIX, server_id))
+                with suppress(MessageNotModified):
+                    await callback_query.message.edit_text(
+                        "Send bot details in one of these formats:\n\n"
+                        "<code>manager=screen\nlabel=My Bot\nsession=mybot\nworkdir=/root/mybot\ncommand=python3 bot.py</code>\n\n"
+                        "<code>manager=docker\nlabel=My Docker Bot\ncontainer=my-container</code>",
+                        reply_markup=vps_bot_prompt_keyboard(server_id),
+                    )
+                await callback_query.answer("Send bot details.")
+                return
+            if action == "sessions":
+                sessions = await vps_client.list_screen_sessions(server_config)
+                session_text = "\n".join(f"- <code>{html.escape(item)}</code>" for item in sessions)
+                if not session_text:
+                    session_text = "No running screen sessions found."
+                await callback_query.message.reply_text(
+                    f"<b>{html.escape(str(server.get('name', 'VPS')))} sessions</b>\n{session_text}"
+                )
+                await callback_query.answer("Sessions loaded.")
+                return
+            if action == "containers":
+                containers = await vps_client.list_docker_containers(server_config, all_containers=True)
+                container_lines: list[str] = []
+                for item in containers:
+                    name, _, status = item.partition("|")
+                    if status:
+                        container_lines.append(
+                            f"- <code>{html.escape(name)}</code> : {html.escape(status)}"
+                        )
+                    else:
+                        container_lines.append(f"- <code>{html.escape(item)}</code>")
+                container_text = "\n".join(container_lines)
+                if not container_text:
+                    container_text = "No Docker containers found."
+                await callback_query.message.reply_text(
+                    f"<b>{html.escape(str(server.get('name', 'VPS')))} containers</b>\n{container_text}"
+                )
+                await callback_query.answer("Containers loaded.")
+                return
+            if action == "delete":
+                await db.delete_vps_server(user_id, server_id)
+                await db.set_state(user_id, None)
+                await render_vps_home_in_place(callback_query, user_id)
+                await callback_query.answer("VPS deleted.")
+                return
+
+            await callback_query.answer("Unknown VPS action.", show_alert=True)
+            return
+
+        if data.startswith("vpsbot:"):
+            _, server_id, bot_id = data.split(":", maxsplit=2)
+            await db.set_state(user_id, None)
+            await render_vps_bot_panel(callback_query, user_id, server_id, bot_id)
+            await callback_query.answer()
+            return
+
+        if data.startswith("vpsbotact:"):
+            _, action, server_id, bot_id = data.split(":", maxsplit=3)
+            server = await get_vps_server_or_raise(user_id, server_id)
+            bot_data = await get_vps_bot_or_raise(user_id, server_id, bot_id)
+            server_config = build_server_config(server)
+            manager_type = bot_manager_type(bot_data)
+
+            if action == "delete":
+                await db.delete_vps_bot(user_id, server_id, bot_id)
+                await render_vps_bots_panel(callback_query, user_id, server_id)
+                await callback_query.answer("VPS bot deleted.")
+                return
+            if manager_type == "docker":
+                bot_config = build_docker_bot_config(bot_data)
+                if action == "start":
+                    await vps_client.start_docker_bot(server_config, bot_config)
+                    await callback_query.answer("Docker bot started.")
+                elif action == "stop":
+                    await vps_client.stop_docker_bot(server_config, bot_config.container_name)
+                    await callback_query.answer("Docker bot stopped.")
+                elif action == "restart":
+                    await vps_client.restart_docker_bot(server_config, bot_config)
+                    await callback_query.answer("Docker bot restarted.")
+                elif action == "status":
+                    status_text = await vps_client.docker_container_status(server_config, bot_config.container_name)
+                    await callback_query.message.reply_text(
+                        f"<b>{html.escape(bot_config.label)}</b> container is <b>{html.escape(status_text)}</b>."
+                    )
+                    await callback_query.answer("Status checked.")
+                    return
+                elif action == "logs":
+                    log_text = await vps_client.docker_logs(server_config, bot_config.container_name, tail=120)
+                    preview = format_log_preview(log_text or "No Docker logs available.")
+                    await callback_query.message.reply_text(
+                        f"<b>{html.escape(bot_config.label)} Docker logs</b>\n\n"
+                        f"<pre>{html.escape(preview)}</pre>"
+                    )
+                    await callback_query.answer("Docker logs sent.")
+                    return
+                else:
+                    await callback_query.answer("Unknown Docker action.", show_alert=True)
+                    return
+            else:
+                bot_config = build_screen_bot_config(bot_data)
+                if action == "start":
+                    await vps_client.start_screen_bot(server_config, bot_config)
+                    await callback_query.answer("Screen bot started.")
+                elif action == "stop":
+                    await vps_client.stop_screen_bot(server_config, bot_config.session_name)
+                    await callback_query.answer("Screen bot stopped.")
+                elif action == "restart":
+                    await vps_client.restart_screen_bot(server_config, bot_config)
+                    await callback_query.answer("Screen bot restarted.")
+                elif action == "status":
+                    is_running = await vps_client.is_session_running(server_config, bot_config.session_name)
+                    status_text = "running" if is_running else "stopped"
+                    await callback_query.message.reply_text(
+                        f"<b>{html.escape(bot_config.label)}</b> is currently <b>{status_text}</b>."
+                    )
+                    await callback_query.answer("Status checked.")
+                    return
+                elif action == "capture":
+                    capture = await vps_client.capture_screen(server_config, bot_config.session_name)
+                    preview = format_log_preview(capture or "No screen output available.")
+                    await callback_query.message.reply_text(
+                        f"<b>{html.escape(bot_config.label)} screen capture</b>\n\n"
+                        f"<pre>{html.escape(preview)}</pre>"
+                    )
+                    await callback_query.answer("Screen capture sent.")
+                    return
+                else:
+                    await callback_query.answer("Unknown screen action.", show_alert=True)
+                    return
+
+            await render_vps_bot_panel(callback_query, user_id, server_id, bot_id)
             return
 
         if data == "apps:back":
@@ -879,6 +1357,9 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
         await callback_query.answer("Unknown button.", show_alert=True)
     except HerokuAPIError as exc:
         LOGGER.warning("Heroku API error while handling callback: %s", exc)
+        await callback_query.answer(str(exc), show_alert=True)
+    except VPSAPIError as exc:
+        LOGGER.warning("VPS error while handling callback: %s", exc)
         await callback_query.answer(str(exc), show_alert=True)
     except Exception as exc:
         LOGGER.exception("Unexpected callback error")
