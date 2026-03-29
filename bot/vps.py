@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 import shlex
 from uuid import uuid4
@@ -38,6 +39,13 @@ class DockerBotConfig:
     container_name: str
 
 
+@dataclass(slots=True)
+class ScreenSetupGuess:
+    workdir: str
+    command: str
+    pid: int | None = None
+
+
 class VPSClient:
     @staticmethod
     def _validate_session_name(session_name: str) -> None:
@@ -66,6 +74,14 @@ class VPSClient:
 
         return output or error
 
+    def _session_locator_command(self, session_name: str) -> str:
+        self._validate_session_name(session_name)
+        return (
+            "command -v screen >/dev/null 2>&1 || { echo 'screen is not installed.' >&2; exit 1; }; "
+            f"screen -ls 2>/dev/null | awk '$1 ~ /^[0-9]+\\.{re.escape(session_name)}$/ "
+            "{split($1,a,\".\"); print a[1]; exit}'"
+        )
+
     async def test_connection(self, server: VPSServerConfig) -> str:
         command = "bash -lc " + shlex.quote(
             "printf 'host=%s\nuser=%s\n' \"$(hostname)\" \"$(whoami)\"; "
@@ -74,14 +90,33 @@ class VPSClient:
         )
         return await self._run(server, command)
 
-    async def list_docker_containers(self, server: VPSServerConfig, *, all_containers: bool = False) -> list[str]:
+    async def list_docker_containers(
+        self,
+        server: VPSServerConfig,
+        *,
+        all_containers: bool = False,
+    ) -> list[dict[str, str]]:
         all_flag = "-a " if all_containers else ""
         command = "bash -lc " + shlex.quote(
             "command -v docker >/dev/null 2>&1 || { echo 'docker is not installed.' >&2; exit 1; }; "
-            f"docker ps {all_flag}--format '{{{{.Names}}}}|{{{{.Status}}}}'"
+            f"docker ps {all_flag}--format '{{{{.Names}}}}|{{{{.Image}}}}|{{{{.Status}}}}'"
         )
         output = await self._run(server, command)
-        return [line.strip() for line in output.splitlines() if line.strip()]
+        containers: list[dict[str, str]] = []
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            name, _, rest = stripped.partition("|")
+            image, _, status = rest.partition("|")
+            containers.append(
+                {
+                    "name": name.strip(),
+                    "image": image.strip(),
+                    "status": status.strip(),
+                }
+            )
+        return containers
 
     async def docker_container_status(self, server: VPSServerConfig, container_name: str) -> str:
         command = "bash -lc " + shlex.quote(
@@ -130,6 +165,114 @@ class VPSClient:
             if match:
                 sessions.append(match.group(1))
         return sessions
+
+    async def auto_detect_screen_setup(self, server: VPSServerConfig, session_name: str) -> ScreenSetupGuess:
+        self._validate_session_name(session_name)
+        remote_script = f"""
+set -e
+session_pid="$({self._session_locator_command(session_name)})"
+if [ -z "$session_pid" ]; then
+  echo "Screen session not found." >&2
+  exit 1
+fi
+if command -v python3 >/dev/null 2>&1; then
+  py_bin=python3
+elif command -v python >/dev/null 2>&1; then
+  py_bin=python
+else
+  echo "Python is required on the VPS to auto-detect screen setup." >&2
+  exit 1
+fi
+SESSION_PID="$session_pid" "$py_bin" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+session_pid = int(os.environ["SESSION_PID"])
+wrapper_names = {{"screen", "screen-4.09.00", "bash", "sh", "dash", "zsh", "fish", "sudo", "su"}}
+preferred_names = {{"python", "python3", "node", "npm", "java", "go", "ruby", "php", "perl", "bun"}}
+
+def children(pid: int) -> list[int]:
+    try:
+        text = Path(f"/proc/{{pid}}/task/{{pid}}/children").read_text().strip()
+    except Exception:
+        return []
+    return [int(part) for part in text.split() if part.isdigit()]
+
+def cmdline(pid: int) -> list[str]:
+    try:
+        data = Path(f"/proc/{{pid}}/cmdline").read_bytes()
+    except Exception:
+        return []
+    return [part.decode("utf-8", "ignore") for part in data.split(b"\\0") if part]
+
+def cwd(pid: int) -> str:
+    try:
+        return os.readlink(f"/proc/{{pid}}/cwd")
+    except Exception:
+        return ""
+
+seen = set()
+queue: list[tuple[int, int]] = [(session_pid, 0)]
+best: dict | None = None
+best_score = -10**9
+
+while queue:
+    pid, depth = queue.pop(0)
+    if pid in seen:
+        continue
+    seen.add(pid)
+    for child in children(pid):
+        queue.append((child, depth + 1))
+
+    args = cmdline(pid)
+    if not args:
+        continue
+
+    exe_name = os.path.basename(args[0]).lower()
+    current_cwd = cwd(pid)
+    joined = " ".join(args).strip()
+    score = depth * 100
+
+    if current_cwd:
+        score += 20
+    if exe_name and exe_name not in wrapper_names:
+        score += 80
+    if exe_name in preferred_names:
+        score += 120
+    if any(token in joined for token in ("main.py", ".py", "start.sh", "node ", "python", "npm", "java ")):
+        score += 40
+    if pid == session_pid:
+        score -= 200
+
+    if score > best_score:
+        best_score = score
+        best = {{
+            "pid": pid,
+            "workdir": current_cwd,
+            "command": joined,
+        }}
+
+if not best or not best.get("workdir") or not best.get("command"):
+    raise SystemExit("Unable to auto-detect workdir/command for this screen session.")
+
+print(json.dumps(best))
+PY
+"""
+        output = await self._run(server, "bash -lc " + shlex.quote(remote_script))
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise VPSAPIError("Unable to parse auto-detected screen setup.") from exc
+
+        workdir = str(payload.get("workdir", "")).strip()
+        command = str(payload.get("command", "")).strip()
+        if not workdir or not command:
+            raise VPSAPIError("Unable to auto-detect workdir and command for this screen session.")
+
+        pid_value = payload.get("pid")
+        pid = int(pid_value) if isinstance(pid_value, int | float) or str(pid_value).isdigit() else None
+        return ScreenSetupGuess(workdir=workdir, command=command, pid=pid)
 
     async def is_session_running(self, server: VPSServerConfig, session_name: str) -> bool:
         self._validate_session_name(session_name)

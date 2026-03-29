@@ -219,7 +219,7 @@ class Database:
         user_id: int,
         server_id: str,
         scan_type: str,
-        items: list[str],
+        items: list[dict[str, Any]],
     ) -> None:
         await self.users.update_one(
             {"user_id": user_id},
@@ -227,11 +227,18 @@ class Database:
             upsert=True,
         )
 
-    async def get_vps_scan_results(self, user_id: int, server_id: str, scan_type: str) -> list[str]:
+    async def get_vps_scan_results(self, user_id: int, server_id: str, scan_type: str) -> list[dict[str, str]]:
         user = await self.get_user(user_id)
         if not user:
             return []
         scan_results = user.get("vps_scan_results", {}).get(server_id, {}).get(scan_type, [])
         if not isinstance(scan_results, list):
             return []
-        return [str(item) for item in scan_results]
+        normalized: list[dict[str, str]] = []
+        for item in scan_results:
+            if isinstance(item, dict):
+                normalized.append({str(key): str(value) for key, value in item.items()})
+            else:
+                value = str(item)
+                normalized.append({"label": value, "value": value})
+        return normalized

@@ -239,7 +239,12 @@ def vps_bot_keyboard(
         )
 
     if needs_setup:
-        rows.append([InlineKeyboardButton("Complete Setup", callback_data=f"vpsbotact:setup:{server_id}:{bot_id}")])
+        rows.append(
+            [
+                InlineKeyboardButton("Try Auto Setup", callback_data=f"vpsbotact:autosetup:{server_id}:{bot_id}"),
+                InlineKeyboardButton("Manual Setup", callback_data=f"vpsbotact:setup:{server_id}:{bot_id}"),
+            ]
+        )
 
     rows.append([InlineKeyboardButton("Back", callback_data=f"vpsact:bots:{server_id}")])
     return InlineKeyboardMarkup(rows)
@@ -258,13 +263,38 @@ def vps_scan_menu_keyboard(server_id: str) -> InlineKeyboardMarkup:
         ]
     )
 
+def vps_scan_results_keyboard(
+    server_id: str,
+    scan_type: str,
+    items: list[dict[str, str]],
+    page: int,
+    page_size: int = 8,
+) -> InlineKeyboardMarkup:
+    start = page * page_size
+    end = start + page_size
+    page_items = items[start:end]
 
-def vps_scan_results_keyboard(server_id: str, scan_type: str, items: list[str]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     buttons = [
-        InlineKeyboardButton(item, callback_data=f"vpsimport:{scan_type}:{server_id}:{index}")
-        for index, item in enumerate(items)
+        InlineKeyboardButton(
+            (item["label"][:57] + "...") if len(item["label"]) > 60 else item["label"],
+            callback_data=f"vpsimport:{scan_type}:{server_id}:{start + index}",
+        )
+        for index, item in enumerate(page_items)
     ]
     rows.extend(_chunk(buttons, 1))
+
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton("Previous", callback_data=f"vpsscanpage:{scan_type}:{server_id}:{page - 1}")
+        )
+    if end < len(items):
+        nav_row.append(
+            InlineKeyboardButton("Next", callback_data=f"vpsscanpage:{scan_type}:{server_id}:{page + 1}")
+        )
+    if nav_row:
+        rows.append(nav_row)
+
     rows.append([InlineKeyboardButton("Back", callback_data=f"vpsscanmenu:{server_id}")])
     return InlineKeyboardMarkup(rows)
