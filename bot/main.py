@@ -362,6 +362,13 @@ def format_log_preview(log_text: str, limit: int = 3500) -> str:
     return f"{log_text[-limit:]}\n\n...truncated to recent lines..."
 
 
+def format_alert_text(*lines: str, limit: int = 180) -> str:
+    text = "\n".join(line.strip() for line in lines if line and line.strip())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3].rstrip()}..."
+
+
 def current_stack(app_data: dict) -> str:
     build_stack = app_data.get("build_stack") or {}
     stack = app_data.get("stack") or {}
@@ -1380,12 +1387,14 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                     },
                 )
                 await render_vps_bot_panel(callback_query, user_id, server_id, bot_id)
-                await callback_query.message.reply_text(
-                    "Auto setup detected:\n"
-                    f"Workdir: <code>{html.escape(guess.workdir)}</code>\n"
-                    f"Command: <code>{html.escape(guess.command)}</code>"
+                await callback_query.answer(
+                    format_alert_text(
+                        "Auto setup detected",
+                        f"Workdir: {guess.workdir}",
+                        f"Command: {guess.command}",
+                    ),
+                    show_alert=True,
                 )
-                await callback_query.answer("Auto setup completed.")
                 return
             if action == "setup":
                 await db.set_state(user_id, state_for_vps_bot(WAITING_SETUP_SCREEN_BOT_PREFIX, server_id, bot_id))
@@ -1410,10 +1419,12 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                     await callback_query.answer("Docker bot restarted.")
                 elif action == "status":
                     status_text = await vps_client.docker_container_status(server_config, bot_config.container_name)
-                    await callback_query.message.reply_text(
-                        f"<b>{html.escape(bot_config.label)}</b> container is <b>{html.escape(status_text)}</b>."
+                    await callback_query.answer(
+                        format_alert_text(
+                            f"{bot_config.label} container is {status_text}.",
+                        ),
+                        show_alert=True,
                     )
-                    await callback_query.answer("Status checked.")
                     return
                 elif action == "logs":
                     log_text = await vps_client.docker_logs(server_config, bot_config.container_name, tail=120)
@@ -1443,10 +1454,12 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                 elif action == "status":
                     is_running = await vps_client.is_session_running(server_config, bot_config.session_name)
                     status_text = "running" if is_running else "stopped"
-                    await callback_query.message.reply_text(
-                        f"<b>{html.escape(bot_config.label)}</b> is currently <b>{status_text}</b>."
+                    await callback_query.answer(
+                        format_alert_text(
+                            f"{bot_config.label} is currently {status_text}.",
+                        ),
+                        show_alert=True,
                     )
-                    await callback_query.answer("Status checked.")
                     return
                 elif action == "capture":
                     capture = await vps_client.capture_screen(server_config, bot_config.session_name)
