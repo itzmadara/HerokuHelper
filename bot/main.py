@@ -35,6 +35,8 @@ from bot.keyboards import (
     vps_bot_prompt_keyboard,
     vps_bots_keyboard,
     vps_prompt_keyboard,
+    vps_scan_menu_keyboard,
+    vps_scan_results_keyboard,
     vps_server_keyboard,
     vps_servers_keyboard,
 )
@@ -47,6 +49,7 @@ WAITING_DEL_VAR_PREFIX = "waiting_del_var"
 WAITING_EDIT_VAR_PREFIX = "waiting_edit_var"
 WAITING_ADD_VPS_STATE = "waiting_add_vps"
 WAITING_ADD_SCREEN_BOT_PREFIX = "waiting_add_screen_bot"
+WAITING_SETUP_SCREEN_BOT_PREFIX = "waiting_setup_screen_bot"
 SCREEN_SESSION_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 bot_username: str | None = None
 
@@ -299,6 +302,43 @@ def bot_manager_type(bot_data: dict) -> str:
     return manager_type
 
 
+def state_for_vps_bot(prefix: str, server_id: str, bot_id: str) -> str:
+    return f"{prefix}:{server_id}:{bot_id}"
+
+
+def vps_bot_from_state(state: str | None, prefix: str) -> tuple[str, str] | None:
+    marker = f"{prefix}:"
+    if not state or not state.startswith(marker):
+        return None
+    payload = state[len(marker) :]
+    server_id, sep, bot_id = payload.partition(":")
+    if not sep or not server_id or not bot_id:
+        return None
+    return server_id, bot_id
+
+
+def screen_bot_needs_setup(bot_data: dict) -> bool:
+    return bot_manager_type(bot_data) == "screen" and (
+        not str(bot_data.get("workdir", "")).strip() or not str(bot_data.get("start_command", "")).strip()
+    )
+
+
+async def find_existing_vps_bot(
+    user_id: int,
+    server_id: str,
+    manager_type: str,
+    identifier: str,
+) -> dict | None:
+    for bot_data in await db.list_vps_bots(user_id, server_id):
+        if bot_manager_type(bot_data) != manager_type:
+            continue
+        if manager_type == "docker" and str(bot_data.get("container_name", "")) == identifier:
+            return bot_data
+        if manager_type == "screen" and str(bot_data.get("session_name", "")) == identifier:
+            return bot_data
+    return None
+
+
 def format_formation(formation: list[dict]) -> str:
     if not formation:
         return "No dynos found."
@@ -474,6 +514,39 @@ async def render_vps_server_panel(callback_query: CallbackQuery, user_id: int, s
         await callback_query.message.edit_text(text, reply_markup=vps_server_keyboard(server_id))
 
 
+async def render_vps_scan_menu(callback_query: CallbackQuery, user_id: int, server_id: str) -> None:
+    server = await get_vps_server_or_raise(user_id, server_id)
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(
+            f"<b>{html.escape(str(server.get('name', 'VPS')))}</b>\nChoose what to auto-detect and import.",
+            reply_markup=vps_scan_menu_keyboard(server_id),
+        )
+
+
+async def render_vps_scan_results(
+    callback_query: CallbackQuery,
+    user_id: int,
+    server_id: str,
+    scan_type: str,
+) -> None:
+    server = await get_vps_server_or_raise(user_id, server_id)
+    items = await db.get_vps_scan_results(user_id, server_id, scan_type)
+    label = "Docker containers" if scan_type == "docker" else "screen sessions"
+    if not items:
+        with suppress(MessageNotModified):
+            await callback_query.message.edit_text(
+                f"<b>{html.escape(str(server.get('name', 'VPS')))}</b>\nNo {label} found to import.",
+                reply_markup=vps_scan_menu_keyboard(server_id),
+            )
+        return
+
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(
+            f"<b>{html.escape(str(server.get('name', 'VPS')))} {label}</b>\nTap one item to import it.",
+            reply_markup=vps_scan_results_keyboard(server_id, scan_type, items),
+        )
+
+
 async def render_vps_bots_panel(callback_query: CallbackQuery, user_id: int, server_id: str) -> None:
     server = await get_vps_server_or_raise(user_id, server_id)
     bots = await db.list_vps_bots(user_id, server_id)
@@ -502,6 +575,7 @@ async def render_vps_bot_panel(
     server = await get_vps_server_or_raise(user_id, server_id)
     bot_data = await get_vps_bot_or_raise(user_id, server_id, bot_id)
     manager_type = bot_manager_type(bot_data)
+    needs_setup = screen_bot_needs_setup(bot_data)
     if manager_type == "docker":
         text = (
             f"<b>{html.escape(str(bot_data.get('label', 'Docker Bot')))}</b>\n"
@@ -515,13 +589,15 @@ async def render_vps_bot_panel(
             f"Server: <code>{html.escape(str(server.get('name', '')))}</code>\n"
             f"Manager: <code>screen</code>\n"
             f"Session: <code>{html.escape(str(bot_data.get('session_name', '')))}</code>\n"
-            f"Workdir: <code>{html.escape(str(bot_data.get('workdir', '')))}</code>\n\n"
-            f"Start command:\n<code>{html.escape(str(bot_data.get('start_command', '')))}</code>"
+            f"Workdir: <code>{html.escape(str(bot_data.get('workdir', 'not set')))}</code>\n\n"
+            f"Start command:\n<code>{html.escape(str(bot_data.get('start_command', 'not set')))}</code>"
         )
+        if needs_setup:
+            text += "\n\nImported session detected. Add workdir and command once to enable start/restart."
     with suppress(MessageNotModified):
         await callback_query.message.edit_text(
             text,
-            reply_markup=vps_bot_keyboard(server_id, bot_id, manager_type),
+            reply_markup=vps_bot_keyboard(server_id, bot_id, manager_type, needs_setup=needs_setup),
         )
 
 
@@ -773,6 +849,7 @@ async def api_capture_handler(client: Client, message: Message) -> None:
 
     state = await db.get_state(message.from_user.id)
     add_screen_bot_server = app_from_state(state, WAITING_ADD_SCREEN_BOT_PREFIX)
+    setup_screen_bot = vps_bot_from_state(state, WAITING_SETUP_SCREEN_BOT_PREFIX)
     set_var_app = app_from_state(state, WAITING_SET_VAR_PREFIX)
     del_var_app = app_from_state(state, WAITING_DEL_VAR_PREFIX)
     edit_var_data = var_from_state(state, WAITING_EDIT_VAR_PREFIX)
@@ -811,6 +888,39 @@ async def api_capture_handler(client: Client, message: Message) -> None:
         await db.set_state(message.from_user.id, None)
         await message.reply_text(
             f"VPS <b>{html.escape(fields['name'])}</b> saved.\nUse /myvps to test SSH and manage bots."
+        )
+        return
+
+    if setup_screen_bot:
+        server_id, bot_id = setup_screen_bot
+        bot_data = await db.get_vps_bot(message.from_user.id, server_id, bot_id)
+        if not bot_data or bot_manager_type(bot_data) != "screen":
+            await db.set_state(message.from_user.id, None)
+            await message.reply_text("That screen bot was not found anymore. Use /myvps and try again.")
+            return
+
+        fields = parse_mapping_message(message.text)
+        if not fields.get("workdir") or not fields.get("command"):
+            await message.reply_text(
+                "Send the missing screen setup like this:\n"
+                "<code>workdir=/root/mybot\ncommand=python3 bot.py</code>",
+                reply_markup=vps_bot_prompt_keyboard(server_id),
+            )
+            return
+
+        await db.save_vps_bot(
+            message.from_user.id,
+            server_id,
+            bot_id,
+            {
+                **{key: value for key, value in bot_data.items() if key != "id"},
+                "workdir": fields["workdir"],
+                "start_command": fields["command"],
+            },
+        )
+        await db.set_state(message.from_user.id, None)
+        await message.reply_text(
+            f"Setup completed for <b>{html.escape(str(bot_data.get('label', 'Screen Bot')))}</b>."
         )
         return
 
@@ -1045,6 +1155,88 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             return
 
+        if data.startswith("vpsscanmenu:"):
+            server_id = data.split(":", maxsplit=1)[1]
+            await db.set_state(user_id, None)
+            await render_vps_scan_menu(callback_query, user_id, server_id)
+            await callback_query.answer()
+            return
+
+        if data.startswith("vpsscan:"):
+            _, scan_type, server_id = data.split(":", maxsplit=2)
+            server = await get_vps_server_or_raise(user_id, server_id)
+            server_config = build_server_config(server)
+            if scan_type == "docker":
+                items = [item.partition("|")[0] for item in await vps_client.list_docker_containers(server_config, all_containers=True)]
+            elif scan_type == "screen":
+                items = []
+                for item in await vps_client.list_screen_sessions(server_config):
+                    _, _, session_name = item.partition(".")
+                    items.append(session_name or item)
+            else:
+                await callback_query.answer("Unknown scan type.", show_alert=True)
+                return
+
+            await db.save_vps_scan_results(user_id, server_id, scan_type, items)
+            await render_vps_scan_results(callback_query, user_id, server_id, scan_type)
+            await callback_query.answer("Scan completed.")
+            return
+
+        if data.startswith("vpsimport:"):
+            _, scan_type, server_id, index_str = data.split(":", maxsplit=3)
+            items = await db.get_vps_scan_results(user_id, server_id, scan_type)
+            index = int(index_str)
+            if index < 0 or index >= len(items):
+                raise VPSAPIError("Scanned item not found. Run the scan again.")
+
+            item = items[index]
+            if scan_type == "docker":
+                existing = await find_existing_vps_bot(user_id, server_id, "docker", item)
+                if existing:
+                    await render_vps_bot_panel(callback_query, user_id, server_id, str(existing["id"]))
+                    await callback_query.answer("Container already imported.")
+                    return
+                bot_id = uuid4().hex[:10]
+                await db.save_vps_bot(
+                    user_id,
+                    server_id,
+                    bot_id,
+                    {
+                        "label": item,
+                        "manager_type": "docker",
+                        "container_name": item,
+                    },
+                )
+                await render_vps_bot_panel(callback_query, user_id, server_id, bot_id)
+                await callback_query.answer("Docker bot imported.")
+                return
+
+            if scan_type == "screen":
+                existing = await find_existing_vps_bot(user_id, server_id, "screen", item)
+                if existing:
+                    await render_vps_bot_panel(callback_query, user_id, server_id, str(existing["id"]))
+                    await callback_query.answer("Screen session already imported.")
+                    return
+                bot_id = uuid4().hex[:10]
+                await db.save_vps_bot(
+                    user_id,
+                    server_id,
+                    bot_id,
+                    {
+                        "label": item,
+                        "manager_type": "screen",
+                        "session_name": item,
+                        "workdir": "",
+                        "start_command": "",
+                    },
+                )
+                await render_vps_bot_panel(callback_query, user_id, server_id, bot_id)
+                await callback_query.answer("Screen session imported.")
+                return
+
+            await callback_query.answer("Unknown import type.", show_alert=True)
+            return
+
         if data.startswith("vpsact:"):
             _, action, server_id = data.split(":", maxsplit=2)
             server = await get_vps_server_or_raise(user_id, server_id)
@@ -1061,6 +1253,11 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
             if action == "bots":
                 await db.set_state(user_id, None)
                 await render_vps_bots_panel(callback_query, user_id, server_id)
+                await callback_query.answer()
+                return
+            if action == "scanmenu":
+                await db.set_state(user_id, None)
+                await render_vps_scan_menu(callback_query, user_id, server_id)
                 await callback_query.answer()
                 return
             if action == "addbot":
@@ -1132,6 +1329,16 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                 await render_vps_bots_panel(callback_query, user_id, server_id)
                 await callback_query.answer("VPS bot deleted.")
                 return
+            if action == "setup":
+                await db.set_state(user_id, state_for_vps_bot(WAITING_SETUP_SCREEN_BOT_PREFIX, server_id, bot_id))
+                with suppress(MessageNotModified):
+                    await callback_query.message.edit_text(
+                        "Send the missing screen setup like this:\n"
+                        "<code>workdir=/root/mybot\ncommand=python3 bot.py</code>",
+                        reply_markup=vps_bot_prompt_keyboard(server_id),
+                    )
+                await callback_query.answer("Send workdir and command.")
+                return
             if manager_type == "docker":
                 bot_config = build_docker_bot_config(bot_data)
                 if action == "start":
@@ -1164,6 +1371,8 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                     return
             else:
                 bot_config = build_screen_bot_config(bot_data)
+                if action in {"start", "restart"} and screen_bot_needs_setup(bot_data):
+                    raise VPSAPIError("This imported screen bot needs setup first. Tap Complete Setup.")
                 if action == "start":
                     await vps_client.start_screen_bot(server_config, bot_config)
                     await callback_query.answer("Screen bot started.")

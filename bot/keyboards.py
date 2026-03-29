@@ -175,6 +175,7 @@ def vps_server_keyboard(server_id: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("Containers", callback_data=f"vpsact:containers:{server_id}"),
+                InlineKeyboardButton("Scan Import", callback_data=f"vpsact:scanmenu:{server_id}"),
             ],
             [
                 InlineKeyboardButton("Delete VPS", callback_data=f"vpsact:delete:{server_id}"),
@@ -204,7 +205,13 @@ def vps_bot_prompt_keyboard(server_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def vps_bot_keyboard(server_id: str, bot_id: str, manager_type: str) -> InlineKeyboardMarkup:
+def vps_bot_keyboard(
+    server_id: str,
+    bot_id: str,
+    manager_type: str,
+    *,
+    needs_setup: bool = False,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton("Start", callback_data=f"vpsbotact:start:{server_id}:{bot_id}"),
@@ -231,5 +238,33 @@ def vps_bot_keyboard(server_id: str, bot_id: str, manager_type: str) -> InlineKe
             ]
         )
 
+    if needs_setup:
+        rows.append([InlineKeyboardButton("Complete Setup", callback_data=f"vpsbotact:setup:{server_id}:{bot_id}")])
+
     rows.append([InlineKeyboardButton("Back", callback_data=f"vpsact:bots:{server_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def vps_scan_menu_keyboard(server_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Scan Screen", callback_data=f"vpsscan:screen:{server_id}"),
+                InlineKeyboardButton("Scan Docker", callback_data=f"vpsscan:docker:{server_id}"),
+            ],
+            [
+                InlineKeyboardButton("Back", callback_data=f"vpssrv:{server_id}"),
+            ],
+        ]
+    )
+
+
+def vps_scan_results_keyboard(server_id: str, scan_type: str, items: list[str]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    buttons = [
+        InlineKeyboardButton(item, callback_data=f"vpsimport:{scan_type}:{server_id}:{index}")
+        for index, item in enumerate(items)
+    ]
+    rows.extend(_chunk(buttons, 1))
+    rows.append([InlineKeyboardButton("Back", callback_data=f"vpsscanmenu:{server_id}")])
     return InlineKeyboardMarkup(rows)

@@ -166,6 +166,7 @@ class Database:
                 "$unset": {
                     f"vps_servers.{server_id}": "",
                     f"vps_bots.{server_id}": "",
+                    f"vps_scan_results.{server_id}": "",
                 }
             },
             upsert=True,
@@ -212,3 +213,25 @@ class Database:
             {"$unset": {f"vps_bots.{server_id}.{bot_id}": ""}},
             upsert=True,
         )
+
+    async def save_vps_scan_results(
+        self,
+        user_id: int,
+        server_id: str,
+        scan_type: str,
+        items: list[str],
+    ) -> None:
+        await self.users.update_one(
+            {"user_id": user_id},
+            {"$set": {f"vps_scan_results.{server_id}.{scan_type}": items}},
+            upsert=True,
+        )
+
+    async def get_vps_scan_results(self, user_id: int, server_id: str, scan_type: str) -> list[str]:
+        user = await self.get_user(user_id)
+        if not user:
+            return []
+        scan_results = user.get("vps_scan_results", {}).get(server_id, {}).get(scan_type, [])
+        if not isinstance(scan_results, list):
+            return []
+        return [str(item) for item in scan_results]

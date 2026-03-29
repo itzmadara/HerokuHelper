@@ -9,6 +9,7 @@ It also supports saving VPS servers and controlling `screen`-managed or Docker-b
 - `/start` stores the user in MongoDB for future broadcasts.
 - `/myapps` prompts users to add a Heroku API key if they have not connected one yet.
 - `/myvps` lets users save VPS credentials and manage `screen` or Docker bots.
+- VPS scan/import flow can auto-detect running `screen` sessions and Docker containers for one-tap import.
 - Automatic Telegram bot command setup on startup.
 - Owner-only `/broadcast` command for sending a message to all saved users.
 - Lists Heroku apps in inline buttons with up to 6 buttons per row.
