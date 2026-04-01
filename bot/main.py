@@ -263,6 +263,24 @@ def parse_mapping_message(raw_text: str) -> dict[str, str]:
     return data
 
 
+def parse_config_var_updates(raw_text: str) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if "=" not in stripped:
+            raise ValueError("Each config var must be on its own line like KEY=VALUE.")
+        key, value = stripped.split("=", maxsplit=1)
+        key = key.strip()
+        if not key:
+            raise ValueError("Config var name cannot be empty.")
+        updates[key] = value.strip()
+    if not updates:
+        raise ValueError("Send at least one config var like KEY=VALUE.")
+    return updates
+
+
 def mask_secret(value: str) -> str:
     if len(value) <= 4:
         return "*" * len(value)
@@ -1008,28 +1026,25 @@ async def api_capture_handler(client: Client, message: Message) -> None:
         return
 
     if set_var_app:
-        if "=" not in message.text:
+        try:
+            updates = parse_config_var_updates(message.text)
+        except ValueError as exc:
             await message.reply_text(
-                "Send config vars in this format:\n<code>KEY=VALUE</code>",
-                reply_markup=app_input_keyboard(set_var_app),
-            )
-            return
-
-        key, value = message.text.split("=", maxsplit=1)
-        key = key.strip()
-        value = value.strip()
-        if not key:
-            await message.reply_text(
-                "Config var name cannot be empty.\nUse <code>KEY=VALUE</code>.",
+                "Send one or more config vars like this:\n"
+                "<code>KEY=VALUE</code>\n"
+                "<code>ANOTHER_KEY=ANOTHER_VALUE</code>\n\n"
+                f"Error: <code>{html.escape(str(exc))}</code>",
                 reply_markup=app_input_keyboard(set_var_app),
             )
             return
 
         heroku = await get_heroku_client(message.from_user.id)
-        await heroku.update_config_vars(set_var_app, {key: value})
+        await heroku.update_config_vars(set_var_app, updates)
         await db.set_state(message.from_user.id, None)
+        updated_keys = ", ".join(f"<code>{html.escape(key)}</code>" for key in sorted(updates.keys()))
         await message.reply_text(
-            f"Config var <code>{html.escape(key)}</code> updated for <b>{html.escape(set_var_app)}</b>."
+            f"Updated <b>{len(updates)}</b> config var(s) for <b>{html.escape(set_var_app)}</b>.\n"
+            f"{updated_keys}"
         )
         return
 
@@ -1598,11 +1613,12 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                 await db.set_state(user_id, state_for(WAITING_SET_VAR_PREFIX, app_name))
                 with suppress(MessageNotModified):
                     await callback_query.message.edit_text(
-                        f"Send the config var for <b>{html.escape(app_name)}</b> like this:\n"
-                        "<code>KEY=VALUE</code>",
+                        f"Send one or more config vars for <b>{html.escape(app_name)}</b> like this:\n"
+                        "<code>KEY=VALUE</code>\n"
+                        "<code>ANOTHER_KEY=ANOTHER_VALUE</code>",
                         reply_markup=app_input_keyboard(app_name),
                     )
-                await callback_query.answer("Send KEY=VALUE.")
+                await callback_query.answer("Send one or more KEY=VALUE lines.")
                 return
             elif action == "delvar":
                 await db.set_state(user_id, state_for(WAITING_DEL_VAR_PREFIX, app_name))
