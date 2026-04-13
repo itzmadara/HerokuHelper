@@ -99,7 +99,7 @@ class VPSClient:
         all_flag = "-a " if all_containers else ""
         command = "bash -lc " + shlex.quote(
             "command -v docker >/dev/null 2>&1 || { echo 'docker is not installed.' >&2; exit 1; }; "
-            f"docker ps {all_flag}--format '{{{{.Names}}}}|{{{{.Image}}}}|{{{{.Status}}}}'"
+            f"docker ps {all_flag}--format '{{{{.Names}}}}|{{{{.Image}}}}|{{{{.State}}}}|{{{{.Status}}}}'"
         )
         output = await self._run(server, command)
         containers: list[dict[str, str]] = []
@@ -108,15 +108,43 @@ class VPSClient:
             if not stripped:
                 continue
             name, _, rest = stripped.partition("|")
-            image, _, status = rest.partition("|")
+            image, _, rest = rest.partition("|")
+            state, _, status = rest.partition("|")
             containers.append(
                 {
                     "name": name.strip(),
                     "image": image.strip(),
+                    "state": state.strip(),
                     "status": status.strip(),
                 }
             )
         return containers
+
+    async def list_stopped_docker_containers(self, server: VPSServerConfig) -> list[str]:
+        command = "bash -lc " + shlex.quote(
+            "command -v docker >/dev/null 2>&1 || { echo 'docker is not installed.' >&2; exit 1; }; "
+            "docker ps -a "
+            "--filter status=created "
+            "--filter status=exited "
+            "--filter status=dead "
+            "--format '{{.Names}}'"
+        )
+        output = await self._run(server, command)
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    async def remove_stopped_docker_containers(self, server: VPSServerConfig) -> list[str]:
+        container_names = await self.list_stopped_docker_containers(server)
+        if not container_names:
+            return []
+
+        quoted_names = " ".join(shlex.quote(name) for name in container_names)
+        command = "bash -lc " + shlex.quote(
+            "command -v docker >/dev/null 2>&1 || { echo 'docker is not installed.' >&2; exit 1; }; "
+            f"docker rm {quoted_names}"
+        )
+        output = await self._run(server, command)
+        removed_names = [line.strip() for line in output.splitlines() if line.strip()]
+        return removed_names or container_names
 
     async def docker_container_status(self, server: VPSServerConfig, container_name: str) -> str:
         command = "bash -lc " + shlex.quote(

@@ -34,6 +34,7 @@ from bot.keyboards import (
     vps_bot_keyboard,
     vps_bot_prompt_keyboard,
     vps_bots_keyboard,
+    vps_containers_keyboard,
     vps_prompt_keyboard,
     vps_scan_menu_keyboard,
     vps_scan_results_keyboard,
@@ -341,6 +342,14 @@ def screen_bot_needs_setup(bot_data: dict) -> bool:
     )
 
 
+def docker_container_can_be_deleted(container: dict) -> bool:
+    state = str(container.get("state", "")).strip().lower()
+    if state:
+        return state in {"created", "exited", "dead"}
+    status = str(container.get("status", "")).strip().lower()
+    return status.startswith(("created", "exited", "dead"))
+
+
 async def find_existing_vps_bot(
     user_id: int,
     server_id: str,
@@ -625,6 +634,41 @@ async def render_vps_bot_panel(
         await callback_query.message.edit_text(
             text,
             reply_markup=vps_bot_keyboard(server_id, bot_id, manager_type, needs_setup=needs_setup),
+        )
+
+
+async def render_vps_containers_panel(callback_query: CallbackQuery, user_id: int, server_id: str) -> None:
+    server = await get_vps_server_or_raise(user_id, server_id)
+    server_config = build_server_config(server)
+    containers = await vps_client.list_docker_containers(server_config, all_containers=True)
+
+    cleanup_candidates = [item for item in containers if docker_container_can_be_deleted(item)]
+    container_lines: list[str] = []
+    for item in containers:
+        name = str(item.get("name", "")).strip()
+        image = str(item.get("image", "")).strip()
+        status = str(item.get("status", "")).strip()
+        label = f"{name} ({image})" if image else name
+        if status:
+            container_lines.append(f"- <code>{html.escape(label)}</code> : {html.escape(status)}")
+        else:
+            container_lines.append(f"- <code>{html.escape(label)}</code>")
+
+    if container_lines:
+        container_text = "\n".join(container_lines)
+    else:
+        container_text = "No Docker containers found."
+
+    text = (
+        f"<b>{html.escape(str(server.get('name', 'VPS')))} containers</b>\n"
+        f"Total: <b>{len(containers)}</b>\n"
+        f"Stopped cleanup candidates: <b>{len(cleanup_candidates)}</b>\n\n"
+        f"{container_text}"
+    )
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(
+            text,
+            reply_markup=vps_containers_keyboard(server_id, len(cleanup_candidates)),
         )
 
 
@@ -1333,26 +1377,25 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                 await callback_query.answer("Sessions loaded.")
                 return
             if action == "containers":
-                containers = await vps_client.list_docker_containers(server_config, all_containers=True)
-                container_lines: list[str] = []
-                for item in containers:
-                    name = str(item.get("name", "")).strip()
-                    image = str(item.get("image", "")).strip()
-                    status = str(item.get("status", "")).strip()
-                    label = f"{name} ({image})" if image else name
-                    if status:
-                        container_lines.append(
-                            f"- <code>{html.escape(label)}</code> : {html.escape(status)}"
-                        )
-                    else:
-                        container_lines.append(f"- <code>{html.escape(label)}</code>")
-                container_text = "\n".join(container_lines)
-                if not container_text:
-                    container_text = "No Docker containers found."
-                await callback_query.message.reply_text(
-                    f"<b>{html.escape(str(server.get('name', 'VPS')))} containers</b>\n{container_text}"
-                )
+                await render_vps_containers_panel(callback_query, user_id, server_id)
                 await callback_query.answer("Containers loaded.")
+                return
+            if action == "cleanstopped":
+                removed_containers = await vps_client.remove_stopped_docker_containers(server_config)
+                if removed_containers:
+                    removed_lookup = set(removed_containers)
+                    for bot in await db.list_vps_bots(user_id, server_id):
+                        if bot_manager_type(bot) != "docker":
+                            continue
+                        bot_id = str(bot.get("id", "")).strip()
+                        container_name = str(bot.get("container_name", "")).strip()
+                        if bot_id and container_name and container_name in removed_lookup:
+                            await db.delete_vps_bot(user_id, server_id, bot_id)
+                await render_vps_containers_panel(callback_query, user_id, server_id)
+                if removed_containers:
+                    await callback_query.answer(f"Deleted {len(removed_containers)} stopped container(s).")
+                else:
+                    await callback_query.answer("No stopped containers to delete.")
                 return
             if action == "delete":
                 await db.delete_vps_server(user_id, server_id)

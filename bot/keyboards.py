@@ -187,6 +187,22 @@ def vps_server_keyboard(server_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def vps_containers_keyboard(server_id: str, stopped_count: int = 0) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    action_row: list[InlineKeyboardButton] = []
+    if stopped_count > 0:
+        action_row.append(
+            InlineKeyboardButton(
+                f"Delete Stopped ({stopped_count})",
+                callback_data=f"vpsact:cleanstopped:{server_id}",
+            )
+        )
+    action_row.append(InlineKeyboardButton("Refresh", callback_data=f"vpsact:containers:{server_id}"))
+    rows.append(action_row)
+    rows.append([InlineKeyboardButton("Back", callback_data=f"vpssrv:{server_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
 def vps_bots_keyboard(server_id: str, bots: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     buttons = [
