@@ -372,17 +372,24 @@ def format_migration_report(
     imported_bots: int,
     skipped_bots: int,
     path_result: dict[str, list[str]],
+    tool_result: dict[str, list[str]],
 ) -> str:
     copied = path_result.get("copied", [])
     skipped = path_result.get("skipped", [])
     missing = path_result.get("missing", [])
     failed = path_result.get("failed", [])
+    installed_tools = tool_result.get("installed", [])
+    skipped_tools = tool_result.get("skipped", [])
+    failed_tools = tool_result.get("failed", [])
 
     lines = [
         f"<b>VPS shift completed</b>",
         f"From: <code>{html.escape(source_name)}</code>",
         f"To: <code>{html.escape(target_name)}</code>",
         "",
+        f"Tools installed on new VPS: <b>{len(installed_tools)}</b>",
+        f"Tools already present: <b>{len(skipped_tools)}</b>",
+        f"Tool install failed: <b>{len(failed_tools)}</b>",
         f"Saved bots imported: <b>{imported_bots}</b>",
         f"Saved bots skipped: <b>{skipped_bots}</b>",
         f"Repo/workdir copied: <b>{len(copied)}</b>",
@@ -391,6 +398,12 @@ def format_migration_report(
         f"Repo/workdir failed: <b>{len(failed)}</b>",
     ]
 
+    if installed_tools:
+        installed_text = "\n".join(f"- <code>{html.escape(name)}</code>" for name in installed_tools[:8])
+        lines.extend(["", "Installed tools:", installed_text])
+    if failed_tools:
+        failed_tools_text = "\n".join(f"- <code>{html.escape(name)}</code>" for name in failed_tools[:8])
+        lines.extend(["", "Failed tool installs:", failed_tools_text])
     if copied:
         copied_text = "\n".join(f"- <code>{html.escape(path)}</code>" for path in copied[:5])
         lines.extend(["", "Copied paths:", copied_text])
@@ -404,9 +417,28 @@ def format_migration_report(
     lines.extend(
         [
             "",
-            "Docker runtime data is not copied automatically. This shift copies saved bot entries and saved screen workdirs.",
+            "Docker runtime data is not copied automatically. This shift installs supported tools and copies saved bot entries plus saved screen workdirs.",
         ]
     )
+    return "\n".join(lines)
+
+
+def format_migration_progress(
+    source_name: str,
+    target_name: str,
+    progress_lines: list[str],
+) -> str:
+    lines = [
+        "<b>Shifting VPS...</b>",
+        f"From: <code>{html.escape(source_name)}</code>",
+        f"To: <code>{html.escape(target_name)}</code>",
+        "",
+        "Live progress:",
+    ]
+    if progress_lines:
+        lines.extend(f"- {html.escape(line)}" for line in progress_lines[-12:])
+    else:
+        lines.append("- Preparing migration...")
     return "\n".join(lines)
 
 
@@ -1306,14 +1338,20 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
             source_server = await get_vps_server_or_raise(user_id, source_server_id)
             target_server = await get_vps_server_or_raise(user_id, target_server_id)
             source_bots = await db.list_vps_bots(user_id, source_server_id)
+            progress_lines: list[str] = []
 
-            with suppress(MessageNotModified):
-                await callback_query.message.edit_text(
-                    f"<b>Shifting VPS...</b>\n"
-                    f"From: <code>{html.escape(str(source_server.get('name', 'VPS')))}</code>\n"
-                    f"To: <code>{html.escape(str(target_server.get('name', 'VPS')))}</code>\n\n"
-                    "Copying saved bot entries and saved screen repos now.",
-                )
+            async def push_progress(line: str) -> None:
+                progress_lines.append(line)
+                with suppress(MessageNotModified):
+                    await callback_query.message.edit_text(
+                        format_migration_progress(
+                            str(source_server.get("name", "VPS")),
+                            str(target_server.get("name", "VPS")),
+                            progress_lines,
+                        )
+                    )
+
+            await push_progress("Checking tools and saved bots")
 
             imported_bots = 0
             skipped_bots = 0
@@ -1326,21 +1364,31 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                 )
                 if not identifier:
                     skipped_bots += 1
+                    await push_progress(f"Skipped bot with missing identifier: {bot_data.get('label', 'Unknown')}")
                     continue
 
                 existing = await find_existing_vps_bot(user_id, target_server_id, manager_type, identifier)
                 if existing:
                     skipped_bots += 1
+                    await push_progress(f"Bot already exists on new VPS: {identifier}")
                     continue
 
                 payload = {key: value for key, value in bot_data.items() if key != "id"}
                 await db.save_vps_bot(user_id, target_server_id, uuid4().hex[:10], payload)
                 imported_bots += 1
+                await push_progress(f"Imported saved bot: {payload.get('label', identifier)}")
+
+            tool_result = await vps_client.sync_supported_tools(
+                build_server_config(source_server),
+                build_server_config(target_server),
+                progress=push_progress,
+            )
 
             path_result = await vps_client.copy_paths_between_servers(
                 build_server_config(source_server),
                 build_server_config(target_server),
                 saved_screen_workdirs(source_bots),
+                progress=push_progress,
             )
 
             await render_vps_server_panel(callback_query, user_id, target_server_id)
@@ -1351,6 +1399,7 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                     imported_bots=imported_bots,
                     skipped_bots=skipped_bots,
                     path_result=path_result,
+                    tool_result=tool_result,
                 )
             )
             await callback_query.answer("VPS shift completed.")

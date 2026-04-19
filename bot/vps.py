@@ -6,6 +6,7 @@ import json
 import posixpath
 import re
 import shlex
+from typing import Awaitable, Callable
 from uuid import uuid4
 
 import asyncssh
@@ -46,6 +47,21 @@ class ScreenSetupGuess:
     workdir: str
     command: str
     pid: int | None = None
+
+
+ProgressCallback = Callable[[str], Awaitable[None]]
+
+
+SUPPORTED_SETUP_TOOLS: dict[str, dict[str, str]] = {
+    "screen": {"apt": "screen", "dnf": "screen", "yum": "screen", "apk": "screen"},
+    "docker": {"apt": "docker.io", "dnf": "docker", "yum": "docker", "apk": "docker"},
+    "git": {"apt": "git", "dnf": "git", "yum": "git", "apk": "git"},
+    "python3": {"apt": "python3", "dnf": "python3", "yum": "python3", "apk": "python3"},
+    "pip3": {"apt": "python3-pip", "dnf": "python3-pip", "yum": "python3-pip", "apk": "py3-pip"},
+    "node": {"apt": "nodejs", "dnf": "nodejs", "yum": "nodejs", "apk": "nodejs"},
+    "npm": {"apt": "npm", "dnf": "npm", "yum": "npm", "apk": "npm"},
+    "java": {"apt": "default-jre", "dnf": "java-17-openjdk", "yum": "java-17-openjdk", "apk": "openjdk17-jre"},
+}
 
 
 class VPSClient:
@@ -105,11 +121,121 @@ class VPSClient:
         result = await connection.run(command, check=False)
         return (result.stdout or "").strip() or "missing"
 
+    async def _command_exists(self, connection: asyncssh.SSHClientConnection, command_name: str) -> bool:
+        command = "bash -lc " + shlex.quote(
+            f"command -v {shlex.quote(command_name)} >/dev/null 2>&1 && echo yes || echo no"
+        )
+        result = await connection.run(command, check=False)
+        return (result.stdout or "").strip() == "yes"
+
+    async def _detect_package_manager(self, connection: asyncssh.SSHClientConnection) -> str | None:
+        for manager in ("apt", "dnf", "yum", "apk"):
+            command_name = "apt-get" if manager == "apt" else manager
+            if await self._command_exists(connection, command_name):
+                return manager
+        return None
+
+    async def _install_tool(
+        self,
+        connection: asyncssh.SSHClientConnection,
+        package_manager: str,
+        tool_name: str,
+    ) -> tuple[bool, str]:
+        if tool_name == "pm2":
+            command = "bash -lc " + shlex.quote(
+                "command -v npm >/dev/null 2>&1 || { echo 'npm is required to install pm2.' >&2; exit 1; }; "
+                "npm install -g pm2"
+            )
+        else:
+            package_name = SUPPORTED_SETUP_TOOLS.get(tool_name, {}).get(package_manager)
+            if not package_name:
+                return False, f"No installer mapping for {tool_name} on {package_manager}."
+            if package_manager == "apt":
+                install_script = (
+                    "export DEBIAN_FRONTEND=noninteractive; "
+                    "apt-get update && "
+                    f"apt-get install -y {shlex.quote(package_name)}"
+                )
+            elif package_manager == "apk":
+                install_script = f"apk add --no-cache {shlex.quote(package_name)}"
+            else:
+                installer = "dnf" if package_manager == "dnf" else "yum"
+                install_script = f"{installer} install -y {shlex.quote(package_name)}"
+            if tool_name == "docker":
+                install_script += (
+                    "; if command -v systemctl >/dev/null 2>&1; then "
+                    "systemctl enable docker >/dev/null 2>&1 || true; "
+                    "systemctl start docker >/dev/null 2>&1 || true; "
+                    "fi"
+                )
+            command = "bash -lc " + shlex.quote(install_script)
+
+        result = await connection.run(command, check=False)
+        output = ((result.stderr or "").strip() or (result.stdout or "").strip() or "unknown error")
+        return result.exit_status == 0, output
+
+    async def sync_supported_tools(
+        self,
+        source: VPSServerConfig,
+        target: VPSServerConfig,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, list[str]]:
+        result = {"installed": [], "skipped": [], "missing_on_source": [], "failed": []}
+        source_connection = await self._connect(source)
+        try:
+            target_connection = await self._connect(target)
+        except Exception:
+            source_connection.close()
+            await source_connection.wait_closed()
+            raise
+
+        try:
+            package_manager = await self._detect_package_manager(target_connection)
+            if not package_manager:
+                result["failed"].append("No supported package manager found on target VPS.")
+                return result
+
+            tool_names = list(SUPPORTED_SETUP_TOOLS.keys()) + ["pm2"]
+            for tool_name in tool_names:
+                source_has_tool = await self._command_exists(source_connection, tool_name)
+                if not source_has_tool:
+                    result["missing_on_source"].append(tool_name)
+                    continue
+
+                target_has_tool = await self._command_exists(target_connection, tool_name)
+                if target_has_tool:
+                    result["skipped"].append(tool_name)
+                    if progress:
+                        await progress(f"Tool already present on new VPS: {tool_name}")
+                    continue
+
+                if progress:
+                    await progress(f"Installing {tool_name} on new VPS...")
+                success, details = await self._install_tool(target_connection, package_manager, tool_name)
+                if success:
+                    result["installed"].append(tool_name)
+                    if progress:
+                        await progress(f"Installed {tool_name}")
+                else:
+                    result["failed"].append(f"{tool_name} ({details})")
+                    if progress:
+                        await progress(f"Failed {tool_name}: {details}")
+        finally:
+            source_connection.close()
+            target_connection.close()
+            await source_connection.wait_closed()
+            await target_connection.wait_closed()
+
+        return result
+
     async def copy_paths_between_servers(
         self,
         source: VPSServerConfig,
         target: VPSServerConfig,
         paths: list[str],
+        *,
+        progress: ProgressCallback | None = None,
     ) -> dict[str, list[str]]:
         normalized_paths: list[str] = []
         seen_paths: set[str] = set()
@@ -142,11 +268,15 @@ class VPSClient:
                 source_kind = await self._path_kind(source_connection, remote_path)
                 if source_kind == "missing":
                     result["missing"].append(remote_path)
+                    if progress:
+                        await progress(f"Missing on old VPS: {remote_path}")
                     continue
 
                 target_kind = await self._path_kind(target_connection, remote_path)
                 if target_kind != "missing":
                     result["skipped"].append(remote_path)
+                    if progress:
+                        await progress(f"Skipped existing path on new VPS: {remote_path}")
                     continue
 
                 source_path = remote_path.rstrip("/") or "/"
@@ -165,6 +295,8 @@ class VPSClient:
 
                 source_process = await source_connection.create_process(source_command, encoding=None)
                 target_process = await target_connection.create_process(target_command, encoding=None)
+                if progress:
+                    await progress(f"Copying {remote_path}...")
 
                 try:
                     while True:
@@ -190,9 +322,13 @@ class VPSClient:
                     with suppress(Exception):
                         target_process.close()
                     result["failed"].append(f"{remote_path} ({exc})")
+                    if progress:
+                        await progress(f"Failed {remote_path}: {exc}")
                     continue
 
                 result["copied"].append(remote_path)
+                if progress:
+                    await progress(f"Copied {remote_path}")
         finally:
             source_connection.close()
             target_connection.close()
