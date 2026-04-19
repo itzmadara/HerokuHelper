@@ -351,26 +351,11 @@ def docker_container_can_be_deleted(container: dict) -> bool:
     return status.startswith(("created", "exited", "dead"))
 
 
-def saved_screen_workdirs(bots: list[dict]) -> list[str]:
-    workdirs: list[str] = []
-    seen: set[str] = set()
-    for bot_data in bots:
-        if bot_manager_type(bot_data) != "screen":
-            continue
-        workdir = str(bot_data.get("workdir", "")).strip()
-        if not workdir or workdir in seen:
-            continue
-        workdirs.append(workdir)
-        seen.add(workdir)
-    return workdirs
-
-
 def format_migration_report(
     source_name: str,
     target_name: str,
     *,
-    imported_bots: int,
-    skipped_bots: int,
+    discovered_repos: int,
     path_result: dict[str, list[str]],
     tool_result: dict[str, list[str]],
 ) -> str:
@@ -390,9 +375,8 @@ def format_migration_report(
         f"Tools installed on new VPS: <b>{len(installed_tools)}</b>",
         f"Tools already present: <b>{len(skipped_tools)}</b>",
         f"Tool install failed: <b>{len(failed_tools)}</b>",
-        f"Saved bots imported: <b>{imported_bots}</b>",
-        f"Saved bots skipped: <b>{skipped_bots}</b>",
-        f"Repo/workdir copied: <b>{len(copied)}</b>",
+        f"Git repos found on old VPS: <b>{discovered_repos}</b>",
+        f"Repo copied: <b>{len(copied)}</b>",
         f"Repo/workdir skipped on target: <b>{len(skipped)}</b>",
         f"Repo/workdir missing on source: <b>{len(missing)}</b>",
         f"Repo/workdir failed: <b>{len(failed)}</b>",
@@ -417,7 +401,7 @@ def format_migration_report(
     lines.extend(
         [
             "",
-            "Docker runtime data is not copied automatically. This shift installs supported tools and copies saved bot entries plus saved screen workdirs.",
+            "Saved bot entries are not copied. This shift installs supported tools and copies detected git repositories from the old VPS.",
         ]
     )
     return "\n".join(lines)
@@ -1337,7 +1321,6 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
 
             source_server = await get_vps_server_or_raise(user_id, source_server_id)
             target_server = await get_vps_server_or_raise(user_id, target_server_id)
-            source_bots = await db.list_vps_bots(user_id, source_server_id)
             progress_lines: list[str] = []
 
             async def push_progress(line: str) -> None:
@@ -1351,32 +1334,7 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                         )
                     )
 
-            await push_progress("Checking tools and saved bots")
-
-            imported_bots = 0
-            skipped_bots = 0
-            for bot_data in source_bots:
-                manager_type = bot_manager_type(bot_data)
-                identifier = (
-                    str(bot_data.get("container_name", "")).strip()
-                    if manager_type == "docker"
-                    else str(bot_data.get("session_name", "")).strip()
-                )
-                if not identifier:
-                    skipped_bots += 1
-                    await push_progress(f"Skipped bot with missing identifier: {bot_data.get('label', 'Unknown')}")
-                    continue
-
-                existing = await find_existing_vps_bot(user_id, target_server_id, manager_type, identifier)
-                if existing:
-                    skipped_bots += 1
-                    await push_progress(f"Bot already exists on new VPS: {identifier}")
-                    continue
-
-                payload = {key: value for key, value in bot_data.items() if key != "id"}
-                await db.save_vps_bot(user_id, target_server_id, uuid4().hex[:10], payload)
-                imported_bots += 1
-                await push_progress(f"Imported saved bot: {payload.get('label', identifier)}")
+            await push_progress("Checking installed tools on both VPS servers")
 
             tool_result = await vps_client.sync_supported_tools(
                 build_server_config(source_server),
@@ -1384,10 +1342,17 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                 progress=push_progress,
             )
 
+            repo_paths = await vps_client.list_git_repositories(
+                build_server_config(source_server),
+                progress=push_progress,
+            )
+            if not repo_paths:
+                await push_progress("No git repositories found on old VPS")
+
             path_result = await vps_client.copy_paths_between_servers(
                 build_server_config(source_server),
                 build_server_config(target_server),
-                saved_screen_workdirs(source_bots),
+                repo_paths,
                 progress=push_progress,
             )
 
@@ -1396,8 +1361,7 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                 format_migration_report(
                     str(source_server.get("name", "VPS")),
                     str(target_server.get("name", "VPS")),
-                    imported_bots=imported_bots,
-                    skipped_bots=skipped_bots,
+                    discovered_repos=len(repo_paths),
                     path_result=path_result,
                     tool_result=tool_result,
                 )
