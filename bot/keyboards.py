@@ -178,6 +178,9 @@ def vps_server_keyboard(server_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Scan Import", callback_data=f"vpsact:scanmenu:{server_id}"),
             ],
             [
+                InlineKeyboardButton("Shift to New VPS", callback_data=f"vpsact:migrate:{server_id}"),
+            ],
+            [
                 InlineKeyboardButton("Delete VPS", callback_data=f"vpsact:delete:{server_id}"),
             ],
             [
@@ -278,6 +281,18 @@ def vps_scan_menu_keyboard(server_id: str) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def vps_migrate_target_keyboard(source_server_id: str, servers: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    buttons = [
+        InlineKeyboardButton(server["name"], callback_data=f"vpsmigrate:{source_server_id}:{server['id']}")
+        for server in servers
+    ]
+    rows.extend(_chunk(buttons, 2))
+    rows.append([InlineKeyboardButton("Back", callback_data=f"vpssrv:{source_server_id}")])
+    return InlineKeyboardMarkup(rows)
+
 
 def vps_scan_results_keyboard(
     server_id: str,

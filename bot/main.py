@@ -35,6 +35,7 @@ from bot.keyboards import (
     vps_bot_prompt_keyboard,
     vps_bots_keyboard,
     vps_containers_keyboard,
+    vps_migrate_target_keyboard,
     vps_prompt_keyboard,
     vps_scan_menu_keyboard,
     vps_scan_results_keyboard,
@@ -350,6 +351,65 @@ def docker_container_can_be_deleted(container: dict) -> bool:
     return status.startswith(("created", "exited", "dead"))
 
 
+def saved_screen_workdirs(bots: list[dict]) -> list[str]:
+    workdirs: list[str] = []
+    seen: set[str] = set()
+    for bot_data in bots:
+        if bot_manager_type(bot_data) != "screen":
+            continue
+        workdir = str(bot_data.get("workdir", "")).strip()
+        if not workdir or workdir in seen:
+            continue
+        workdirs.append(workdir)
+        seen.add(workdir)
+    return workdirs
+
+
+def format_migration_report(
+    source_name: str,
+    target_name: str,
+    *,
+    imported_bots: int,
+    skipped_bots: int,
+    path_result: dict[str, list[str]],
+) -> str:
+    copied = path_result.get("copied", [])
+    skipped = path_result.get("skipped", [])
+    missing = path_result.get("missing", [])
+    failed = path_result.get("failed", [])
+
+    lines = [
+        f"<b>VPS shift completed</b>",
+        f"From: <code>{html.escape(source_name)}</code>",
+        f"To: <code>{html.escape(target_name)}</code>",
+        "",
+        f"Saved bots imported: <b>{imported_bots}</b>",
+        f"Saved bots skipped: <b>{skipped_bots}</b>",
+        f"Repo/workdir copied: <b>{len(copied)}</b>",
+        f"Repo/workdir skipped on target: <b>{len(skipped)}</b>",
+        f"Repo/workdir missing on source: <b>{len(missing)}</b>",
+        f"Repo/workdir failed: <b>{len(failed)}</b>",
+    ]
+
+    if copied:
+        copied_text = "\n".join(f"- <code>{html.escape(path)}</code>" for path in copied[:5])
+        lines.extend(["", "Copied paths:", copied_text])
+    if failed:
+        failed_text = "\n".join(f"- <code>{html.escape(path)}</code>" for path in failed[:5])
+        lines.extend(["", "Failed paths:", failed_text])
+    if missing:
+        missing_text = "\n".join(f"- <code>{html.escape(path)}</code>" for path in missing[:5])
+        lines.extend(["", "Missing on source:", missing_text])
+
+    lines.extend(
+        [
+            "",
+            "Docker runtime data is not copied automatically. This shift copies saved bot entries and saved screen workdirs.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 async def find_existing_vps_bot(
     user_id: int,
     server_id: str,
@@ -546,6 +606,20 @@ async def render_vps_server_panel(callback_query: CallbackQuery, user_id: int, s
     )
     with suppress(MessageNotModified):
         await callback_query.message.edit_text(text, reply_markup=vps_server_keyboard(server_id))
+
+
+async def render_vps_migration_targets(callback_query: CallbackQuery, user_id: int, source_server_id: str) -> None:
+    source_server = await get_vps_server_or_raise(user_id, source_server_id)
+    servers = [server for server in await db.list_vps_servers(user_id) if server["id"] != source_server_id]
+    if not servers:
+        raise VPSAPIError("Save the new VPS first, then try Shift to New VPS again.")
+
+    with suppress(MessageNotModified):
+        await callback_query.message.edit_text(
+            f"<b>{html.escape(str(source_server.get('name', 'VPS')))}</b>\n"
+            "Choose the new VPS where saved bots and repos should be copied.",
+            reply_markup=vps_migrate_target_keyboard(source_server_id, servers),
+        )
 
 
 async def render_vps_scan_menu(callback_query: CallbackQuery, user_id: int, server_id: str) -> None:
@@ -1223,6 +1297,65 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             return
 
+        if data.startswith("vpsmigrate:"):
+            _, source_server_id, target_server_id = data.split(":", maxsplit=2)
+            if source_server_id == target_server_id:
+                await callback_query.answer("Choose a different target VPS.", show_alert=True)
+                return
+
+            source_server = await get_vps_server_or_raise(user_id, source_server_id)
+            target_server = await get_vps_server_or_raise(user_id, target_server_id)
+            source_bots = await db.list_vps_bots(user_id, source_server_id)
+
+            with suppress(MessageNotModified):
+                await callback_query.message.edit_text(
+                    f"<b>Shifting VPS...</b>\n"
+                    f"From: <code>{html.escape(str(source_server.get('name', 'VPS')))}</code>\n"
+                    f"To: <code>{html.escape(str(target_server.get('name', 'VPS')))}</code>\n\n"
+                    "Copying saved bot entries and saved screen repos now.",
+                )
+
+            imported_bots = 0
+            skipped_bots = 0
+            for bot_data in source_bots:
+                manager_type = bot_manager_type(bot_data)
+                identifier = (
+                    str(bot_data.get("container_name", "")).strip()
+                    if manager_type == "docker"
+                    else str(bot_data.get("session_name", "")).strip()
+                )
+                if not identifier:
+                    skipped_bots += 1
+                    continue
+
+                existing = await find_existing_vps_bot(user_id, target_server_id, manager_type, identifier)
+                if existing:
+                    skipped_bots += 1
+                    continue
+
+                payload = {key: value for key, value in bot_data.items() if key != "id"}
+                await db.save_vps_bot(user_id, target_server_id, uuid4().hex[:10], payload)
+                imported_bots += 1
+
+            path_result = await vps_client.copy_paths_between_servers(
+                build_server_config(source_server),
+                build_server_config(target_server),
+                saved_screen_workdirs(source_bots),
+            )
+
+            await render_vps_server_panel(callback_query, user_id, target_server_id)
+            await callback_query.message.reply_text(
+                format_migration_report(
+                    str(source_server.get("name", "VPS")),
+                    str(target_server.get("name", "VPS")),
+                    imported_bots=imported_bots,
+                    skipped_bots=skipped_bots,
+                    path_result=path_result,
+                )
+            )
+            await callback_query.answer("VPS shift completed.")
+            return
+
         if data.startswith("vpsscanmenu:"):
             server_id = data.split(":", maxsplit=1)[1]
             await db.set_state(user_id, None)
@@ -1344,6 +1477,11 @@ async def callback_router(client: Client, callback_query: CallbackQuery) -> None
                     f"<pre>{html.escape(result or 'Connected successfully.')}</pre>"
                 )
                 await callback_query.answer("SSH test completed.")
+                return
+            if action == "migrate":
+                await db.set_state(user_id, None)
+                await render_vps_migration_targets(callback_query, user_id, server_id)
+                await callback_query.answer("Choose the new VPS.")
                 return
             if action == "bots":
                 await db.set_state(user_id, None)

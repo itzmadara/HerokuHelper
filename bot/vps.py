@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 import json
+import posixpath
 import re
 import shlex
 from uuid import uuid4
@@ -74,6 +76,18 @@ class VPSClient:
 
         return output or error
 
+    async def _connect(self, server: VPSServerConfig) -> asyncssh.SSHClientConnection:
+        try:
+            return await asyncssh.connect(
+                server.host,
+                port=server.port,
+                username=server.username,
+                password=server.password,
+                known_hosts=None,
+            )
+        except (asyncssh.Error, OSError) as exc:
+            raise VPSAPIError(f"SSH connection failed: {exc}") from exc
+
     def _session_locator_command(self, session_name: str) -> str:
         self._validate_session_name(session_name)
         return (
@@ -81,6 +95,111 @@ class VPSClient:
             f"screen -ls 2>/dev/null | awk '$1 ~ /^[0-9]+\\.{re.escape(session_name)}$/ "
             "{split($1,a,\".\"); print a[1]; exit}'"
         )
+
+    async def _path_kind(self, connection: asyncssh.SSHClientConnection, remote_path: str) -> str:
+        command = "bash -lc " + shlex.quote(
+            f"if [ -d {shlex.quote(remote_path)} ]; then echo dir; "
+            f"elif [ -f {shlex.quote(remote_path)} ]; then echo file; "
+            "else echo missing; fi"
+        )
+        result = await connection.run(command, check=False)
+        return (result.stdout or "").strip() or "missing"
+
+    async def copy_paths_between_servers(
+        self,
+        source: VPSServerConfig,
+        target: VPSServerConfig,
+        paths: list[str],
+    ) -> dict[str, list[str]]:
+        normalized_paths: list[str] = []
+        seen_paths: set[str] = set()
+        for path in paths:
+            clean_path = str(path).strip()
+            if not clean_path or clean_path in seen_paths:
+                continue
+            normalized_paths.append(clean_path)
+            seen_paths.add(clean_path)
+
+        result = {
+            "copied": [],
+            "skipped": [],
+            "missing": [],
+            "failed": [],
+        }
+        if not normalized_paths:
+            return result
+
+        source_connection = await self._connect(source)
+        try:
+            target_connection = await self._connect(target)
+        except Exception:
+            source_connection.close()
+            await source_connection.wait_closed()
+            raise
+
+        try:
+            for remote_path in normalized_paths:
+                source_kind = await self._path_kind(source_connection, remote_path)
+                if source_kind == "missing":
+                    result["missing"].append(remote_path)
+                    continue
+
+                target_kind = await self._path_kind(target_connection, remote_path)
+                if target_kind != "missing":
+                    result["skipped"].append(remote_path)
+                    continue
+
+                source_path = remote_path.rstrip("/") or "/"
+                parent_path = posixpath.dirname(source_path) or "/"
+                base_name = posixpath.basename(source_path)
+                if not base_name:
+                    result["failed"].append(f"{remote_path} (root path is not supported)")
+                    continue
+
+                source_command = "bash -lc " + shlex.quote(
+                    f"tar -C {shlex.quote(parent_path)} -czf - {shlex.quote(base_name)}"
+                )
+                target_command = "bash -lc " + shlex.quote(
+                    f"mkdir -p {shlex.quote(parent_path)} && tar -xzf - -C {shlex.quote(parent_path)}"
+                )
+
+                source_process = await source_connection.create_process(source_command, encoding=None)
+                target_process = await target_connection.create_process(target_command, encoding=None)
+
+                try:
+                    while True:
+                        chunk = await source_process.stdout.read(65536)
+                        if not chunk:
+                            break
+                        target_process.stdin.write(chunk)
+                    target_process.stdin.write_eof()
+
+                    source_result = await source_process.wait(check=False)
+                    target_result = await target_process.wait(check=False)
+                    if source_result.exit_status != 0:
+                        error = (source_result.stderr or b"").decode("utf-8", "ignore").strip()
+                        raise VPSAPIError(error or f"Failed to archive {remote_path} on source VPS.")
+                    if target_result.exit_status != 0:
+                        error = (target_result.stderr or b"").decode("utf-8", "ignore").strip()
+                        raise VPSAPIError(error or f"Failed to extract {remote_path} on target VPS.")
+                except Exception as exc:
+                    with suppress(Exception):
+                        target_process.stdin.write_eof()
+                    with suppress(Exception):
+                        source_process.close()
+                    with suppress(Exception):
+                        target_process.close()
+                    result["failed"].append(f"{remote_path} ({exc})")
+                    continue
+
+                result["copied"].append(remote_path)
+        finally:
+            source_connection.close()
+            target_connection.close()
+            await source_connection.wait_closed()
+            await target_connection.wait_closed()
+
+        return result
 
     async def test_connection(self, server: VPSServerConfig) -> str:
         command = "bash -lc " + shlex.quote(

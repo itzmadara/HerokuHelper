@@ -11,6 +11,7 @@ It also supports saving VPS servers and controlling `screen`-managed or Docker-b
 - `/myvps` lets users save VPS credentials and manage `screen` or Docker bots.
 - VPS scan/import flow can auto-detect running `screen` sessions and Docker containers for one-tap import.
 - VPS container view can clean up stopped Docker containers and remove matching saved Docker bot entries.
+- VPS shift flow can copy saved bot entries to another saved VPS and transfer saved `screen` workdirs/repositories when possible.
 - Automatic Telegram bot command setup on startup.
 - Owner-only `/broadcast` command for sending a message to all saved users.
 - Lists Heroku apps in inline buttons with up to 6 buttons per row.
@@ -63,3 +64,4 @@ python -m bot.main
 - Changing stacks on Heroku can trigger rebuild or release-related behavior depending on the app.
 - VPS `screen` support expects the remote server to have `screen` installed and available in `PATH`.
 - Docker support expects the remote server user to be allowed to run `docker` commands.
+- VPS shift uses `tar` over SSH to copy saved screen workdirs from the old VPS to the new VPS. Existing target paths are skipped for safety.
