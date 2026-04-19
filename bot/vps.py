@@ -121,6 +121,39 @@ class VPSClient:
         result = await connection.run(command, check=False)
         return (result.stdout or "").strip() or "missing"
 
+    async def list_git_repositories(
+        self,
+        server: VPSServerConfig,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> list[str]:
+        remote_script = """
+home_dir="${HOME:-/root}"
+if [ ! -d "$home_dir" ]; then
+  echo "Home directory not found." >&2
+  exit 1
+fi
+find "$home_dir" \\
+  \\( -path "$home_dir/.cache" -o -path "$home_dir/.local" -o -path "$home_dir/.npm" -o -path "$home_dir/.cargo" \\) -prune -o \\
+  -type d -name .git -print
+"""
+        output = await self._run(server, "bash -lc " + shlex.quote(remote_script))
+        repos: list[str] = []
+        seen: set[str] = set()
+        for line in output.splitlines():
+            git_dir = line.strip()
+            if not git_dir or not git_dir.endswith("/.git"):
+                continue
+            repo_path = git_dir[: -len("/.git")]
+            if repo_path in seen:
+                continue
+            repos.append(repo_path)
+            seen.add(repo_path)
+        repos.sort()
+        if progress:
+            await progress(f"Detected {len(repos)} git repo(s) on old VPS")
+        return repos
+
     async def _command_exists(self, connection: asyncssh.SSHClientConnection, command_name: str) -> bool:
         command = "bash -lc " + shlex.quote(
             f"command -v {shlex.quote(command_name)} >/dev/null 2>&1 && echo yes || echo no"
